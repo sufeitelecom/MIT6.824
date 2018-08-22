@@ -43,7 +43,7 @@ func reduceF(key string, values []string) string {
 	}
 	sort.Strings(tmp)
 	b := bytes.Buffer{}
-	b.WriteString(strconv.Itoa(len(values)))
+	b.WriteString(strconv.Itoa(len(tmp)))
 	b.WriteString(" ")
 	for i, tmp := range tmp {
 		if i == 0 {
