@@ -52,7 +52,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 					go func() {
 						registerChan <- worker
 					}()
-					break
+					break //这里提现了当call失败，也就是任务失败了，则会将该任务再一次进行，只有当成功才会跳出循环
 				}
 			}
 		}(i, n_other, phase)
