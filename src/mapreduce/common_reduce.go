@@ -1,8 +1,8 @@
 package mapreduce
 
 import (
-	"os"
 	"encoding/json"
+	"os"
 	"sort"
 )
 
@@ -50,46 +50,49 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+	//第一步，定义全局kv键值对保存所以输入文件内容
 	keyValues := make(map[string][]string, 0)
-	for m :=0 ;m < nMap; m++ {
-		filename := reduceName(jobName,m,reduceTask)
-		file,err := os.Open(filename)
+	//第二步，读取每个中间文件的值，保存到全局kv中，key相同的，value为string分片
+	for m := 0; m < nMap; m++ {
+		filename := reduceName(jobName, m, reduceTask)
+		file, err := os.Open(filename)
 		if err != nil {
 			panic(err)
 		}
 		defer file.Close()
 
 		dec := json.NewDecoder(file)
-		for  {
+		for {
 			var kv KeyValue
 			err := dec.Decode(&kv)
-			if err != nil{
-				break
+			if err != nil {
+				break //没有内容，则进行下一个文件的循环
 			}
-			_,ok := keyValues[kv.Key]
+			_, ok := keyValues[kv.Key]
 			if !ok {
-				keyValues[kv.Key] = make([]string,0)
+				keyValues[kv.Key] = make([]string, 0)
 			}
-			keyValues[kv.Key] = append(keyValues[kv.Key],kv.Value)
+			keyValues[kv.Key] = append(keyValues[kv.Key], kv.Value)
 		}
 	}
-	var keys  []string
+	//第三步，对key值进行排序
+	var keys []string
 	for k, _ := range keyValues {
-		keys = append(keys,k)
+		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-
-	out,err:= os.Create(outFile)
+	//第四步，打开输出文件，将key值相同的进行用户自定义reduce函数处理，并将处理结果输出到文件
+	out, err := os.Create(outFile)
 	if err != nil {
 		panic(err)
 	}
 	defer out.Close()
 
 	enc := json.NewEncoder(out)
-	for _,ky := range keys {
-		res := reduceF(ky,keyValues[ky])
-		err := enc.Encode(&KeyValue{ky,res})
-		if err != nil{
+	for _, ky := range keys {
+		res := reduceF(ky, keyValues[ky])
+		err := enc.Encode(&KeyValue{ky, res})
+		if err != nil {
 			panic(err)
 		}
 	}
