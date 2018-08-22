@@ -5,6 +5,7 @@ import "fmt"
 import (
 	"bytes"
 	"mapreduce"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -30,11 +31,21 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 // should be a single output value for that key.
 func reduceF(key string, values []string) string {
 	// Your code here (Part V).
-
+	//values排序和去重
+	var tmp []string
+	set := make(map[string]int)
+	for _, b := range values {
+		_, ok := set[b]
+		if !ok {
+			set[b] = 1
+			tmp = append(tmp, b)
+		}
+	}
+	sort.Strings(tmp)
 	b := bytes.Buffer{}
 	b.WriteString(strconv.Itoa(len(values)))
 	b.WriteString(" ")
-	for i, tmp := range values {
+	for i, tmp := range tmp {
 		if i == 0 {
 			b.WriteString(tmp)
 		} else {
