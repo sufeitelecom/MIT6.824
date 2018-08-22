@@ -1,7 +1,9 @@
 package mapreduce
 
 import (
+	"encoding/json"
 	"hash/fnv"
+	"os"
 )
 
 func doMap(
@@ -53,6 +55,45 @@ func doMap(
 	//
 	// Your code here (Part I).
 	//
+	//第一步，读写输入文件内容，并将其保存在data中
+	file, err := os.Open(inFile)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	fileinfo, err := file.Stat()
+	if err != nil {
+		panic(err)
+	}
+
+	data := make([]byte, fileinfo.Size())
+	_, err = file.Read(data)
+	if err != nil {
+		panic(err)
+	}
+	//第二步，使用用户指定map函数，将文件处理成kv键值对
+	KeyValue := mapF(inFile, string(data))
+	//第三步，构建中间文件，更新key的ihash值，将键值对以json格式写入中间文件
+	for r := 0; r < nReduce; r++ {
+		filename := reduceName(jobName, mapTask, r) //获取中间文件名
+		reducefile, err := os.Create(filename)
+		if err != nil {
+			panic(err)
+		}
+		defer reducefile.Close()
+
+		enc := json.NewEncoder(reducefile) //使用json格式
+		for _, kv := range KeyValue {
+			if ihash(kv.Key)%int(nReduce) == int(r) {
+				err := enc.Encode(&kv)
+				if err != nil {
+					panic(err)
+				}
+			}
+		}
+
+	}
 }
 
 func ihash(s string) int {

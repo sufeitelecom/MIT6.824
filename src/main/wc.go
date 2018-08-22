@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"mapreduce"
 	"os"
+	"strconv"
+	"strings"
+	"unicode"
 )
 
 //
@@ -15,6 +18,17 @@ import (
 //
 func mapF(filename string, contents string) []mapreduce.KeyValue {
 	// Your code here (Part II).
+	//定义保存结果的结构
+	var res []mapreduce.KeyValue
+	//将内容进行非字母划分，结果保存在value中
+	value := strings.FieldsFunc(contents, func(r rune) bool {
+		return !unicode.IsLetter(r)
+	})
+	//单词计数放入结果中
+	for _, v := range value {
+		res = append(res, mapreduce.KeyValue{v, "1"})
+	}
+	return res
 }
 
 //
@@ -24,6 +38,15 @@ func mapF(filename string, contents string) []mapreduce.KeyValue {
 //
 func reduceF(key string, values []string) string {
 	// Your code here (Part II).
+	var res int
+	for _, v := range values {
+		tmp, err := strconv.Atoi(v)
+		if err != nil {
+			panic(err)
+		}
+		res += tmp
+	}
+	return strconv.Itoa(res)
 }
 
 // Can be run in 3 ways:
