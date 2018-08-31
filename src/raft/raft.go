@@ -20,6 +20,7 @@ package raft
 import "sync"
 import (
 	"bytes"
+	"fmt"
 	"labgob"
 	"labrpc"
 	"math/rand"
@@ -361,13 +362,14 @@ func (rf *Raft) handleAppendEntries(server int, rep AppendEntryReply) {
 			if i == rf.me {
 				continue
 			}
-			if rf.matchIndex[i] > rf.matchIndex[server] {
+			if rf.matchIndex[i] >= rf.matchIndex[server] {
 				reply_count++
 			}
 		}
 		if reply_count >= (len(rf.peers)/2+1) && rf.commitIndex < rf.matchIndex[server] &&
 			rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
 			rf.commitIndex = rf.matchIndex[server]
+			fmt.Println("服务器", rf.me, "提交日志", rf.matchIndex[server])
 			go rf.commitlogs()
 		}
 	}
@@ -382,7 +384,8 @@ func (rf *Raft) commitlogs() {
 		rf.commitIndex = len(rf.log) - 1
 	}
 
-	for i := rf.lastApplied; i < rf.commitIndex; i++ {
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		fmt.Println("服务器", rf.me, "应用日志", rf.commitIndex)
 		rf.applyCh <- ApplyMsg{
 			CommandIndex: i,
 			Command:      rf.log[i].Command,
@@ -398,6 +401,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 	//如果日志小于当前任期号，直接拒绝
 	if args.Term < rf.currentTerm {
 		rep.Term = rf.currentTerm
+		rep.Commitindex = -1
 		rep.Success = false
 		return
 	} else {
@@ -407,13 +411,12 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 		rep.Term = rf.currentTerm
 
 		//如果先前的日志不匹配也需要拒绝
-		if args.Prevlogindex >= 0 && (args.Prevlogindex > len(rf.log)-1 || rf.log[args.Prevlogindex].Term != args.Prevlogterm) {
-			rep.Success = false
+		if args.Prevlogindex >= 0 && (args.Prevlogindex > (len(rf.log)-1) || rf.log[args.Prevlogindex].Term != args.Prevlogterm) {
 			rep.Commitindex = len(rf.log) - 1
 			if rep.Commitindex > args.Prevlogindex {
 				rep.Commitindex = args.Prevlogindex
 			}
-			for rep.Commitindex > 0 {
+			for rep.Commitindex >= 0 {
 				if args.Prevlogterm == rf.log[rep.Commitindex].Term {
 					break
 				}
@@ -434,6 +437,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 			//心跳
 			if len(rf.log)-1 >= args.Leadercommit {
 				rf.commitIndex = args.Leadercommit
+				//fmt.Println("从服务器提交日志",rf.commitIndex)
 				go rf.commitlogs()
 			}
 			rep.Commitindex = args.Prevlogindex
@@ -458,7 +462,7 @@ func (rf *Raft) sendAppendToFollower() {
 		entryargs.Term = rf.currentTerm
 		entryargs.Leaderid = rf.me
 		entryargs.Prevlogindex = rf.nextIndex[i] - 1
-		if entryargs.Prevlogindex > 0 {
+		if entryargs.Prevlogindex >= 0 {
 			entryargs.Prevlogterm = rf.log[entryargs.Prevlogindex].Term
 		}
 		if rf.nextIndex[i] < len(rf.log) {
@@ -468,8 +472,10 @@ func (rf *Raft) sendAppendToFollower() {
 
 		go func(server int, args AppendEntryArgs) {
 			var reply AppendEntryReply
+			fmt.Println("主服务器", rf.me, "发起应用日志", args, "到服务器", server)
 			ok := rf.SendAppendEntryToFollower(server, args, &reply)
 			if ok {
+				fmt.Println("主服务器", rf.me, "收到到服务器", server, "响应", reply)
 				rf.handleAppendEntries(server, reply)
 			}
 		}(i, entryargs)
@@ -496,6 +502,23 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	nlog := LogEntry{
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+	if rf.state != LEADER {
+		isLeader = (rf.state == LEADER)
+		return index, term, isLeader
+	}
+
+	isLeader = (rf.state == LEADER)
+	rf.log = append(rf.log, nlog)
+	term = rf.currentTerm
+	index = len(rf.log) - 1
+	rf.persist()
 
 	return index, term, isLeader
 }
