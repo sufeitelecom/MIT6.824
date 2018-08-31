@@ -20,7 +20,6 @@ package raft
 import "sync"
 import (
 	"bytes"
-	"fmt"
 	"labgob"
 	"labrpc"
 	"math/rand"
@@ -369,7 +368,7 @@ func (rf *Raft) handleAppendEntries(server int, rep AppendEntryReply) {
 		if reply_count >= (len(rf.peers)/2+1) && rf.commitIndex < rf.matchIndex[server] &&
 			rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
 			rf.commitIndex = rf.matchIndex[server]
-			fmt.Println("服务器", rf.me, "提交日志", rf.matchIndex[server])
+			//fmt.Println("服务器", rf.me, "提交日志", rf.matchIndex[server])
 			go rf.commitlogs()
 		}
 	}
@@ -385,11 +384,11 @@ func (rf *Raft) commitlogs() {
 	}
 
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-		fmt.Println("服务器", rf.me, "应用日志", rf.commitIndex)
+		//fmt.Println("服务器", rf.me, "应用日志", rf.commitIndex)
 		rf.applyCh <- ApplyMsg{
-			CommandIndex: i,
+			CommandIndex: i + 1,
 			Command:      rf.log[i].Command,
-			CommandValid: false,
+			CommandValid: true,
 		}
 	}
 	rf.lastApplied = rf.commitIndex
@@ -472,10 +471,10 @@ func (rf *Raft) sendAppendToFollower() {
 
 		go func(server int, args AppendEntryArgs) {
 			var reply AppendEntryReply
-			fmt.Println("主服务器", rf.me, "发起应用日志", args, "到服务器", server)
+			//fmt.Println("主服务器", rf.me, "发起应用日志", args, "到服务器", server)
 			ok := rf.SendAppendEntryToFollower(server, args, &reply)
 			if ok {
-				fmt.Println("主服务器", rf.me, "收到到服务器", server, "响应", reply)
+				//fmt.Println("主服务器", rf.me, "收到到服务器", server, "响应", reply)
 				rf.handleAppendEntries(server, reply)
 			}
 		}(i, entryargs)
@@ -517,7 +516,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = (rf.state == LEADER)
 	rf.log = append(rf.log, nlog)
 	term = rf.currentTerm
-	index = len(rf.log) - 1
+	index = len(rf.log)
 	rf.persist()
 
 	return index, term, isLeader
