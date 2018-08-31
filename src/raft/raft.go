@@ -217,7 +217,8 @@ func (rf *Raft) handleVoteResult(reply RequestVoteReply) {
 
 	if rf.state == CANDIDATE && reply.VoteGranted {
 		rf.grantedvotescount += 1
-		if rf.grantedvotescount > (len(rf.peers)/2 + 1) {
+		if rf.grantedvotescount >= (len(rf.peers)/2 + 1) {
+			//fmt.Println("服务器",rf.me,"成为主！！！！！任期号",rf.currentTerm)
 			rf.state = LEADER
 			//更新作为leader需要维护的状态
 			for i := 0; i < len(rf.peers); i++ {
@@ -225,7 +226,7 @@ func (rf *Raft) handleVoteResult(reply RequestVoteReply) {
 					continue
 				}
 				rf.nextIndex[i] = len(rf.log)
-				rf.matchIndex[i] = 0
+				rf.matchIndex[i] = -1
 			}
 			rf.resetTimer()
 		}
@@ -236,7 +237,7 @@ func (rf *Raft) handleVoteResult(reply RequestVoteReply) {
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -257,24 +258,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	//任期等于本身，则看是否日志最新
-	if rf.currentTerm == args.Lastlogterm {
+	if rf.currentTerm == args.Term {
 		if rf.voteFor == -1 && may_grant {
 			rf.voteFor = args.Candidateid
 			rf.persist()
 		}
 		reply.Term = args.Term
-		reply.VoteGranted = true
+		reply.VoteGranted = (rf.voteFor == args.Candidateid)
 		return
 	}
 
 	//任期大于自身，自身变成追随者
-	if rf.currentTerm < args.Lastlogterm {
-		rf.currentTerm = args.Lastlogterm
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
 		rf.state = FOLLOWER
-		rf.voteFor = args.Candidateid
-		rf.persist()
+		rf.voteFor = -1
+		if may_grant {
+			rf.voteFor = args.Candidateid
+			rf.persist()
+		}
+
 		reply.Term = args.Term
-		reply.VoteGranted = true
+		reply.VoteGranted = (rf.voteFor == args.Candidateid)
 		rf.resetTimer()
 		return
 	}
@@ -309,7 +314,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -360,7 +365,7 @@ func (rf *Raft) handleAppendEntries(server int, rep AppendEntryReply) {
 				reply_count++
 			}
 		}
-		if reply_count > (len(rf.peers)/2+1) && rf.commitIndex < rf.matchIndex[server] &&
+		if reply_count >= (len(rf.peers)/2+1) && rf.commitIndex < rf.matchIndex[server] &&
 			rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
 			rf.commitIndex = rf.matchIndex[server]
 			go rf.commitlogs()
@@ -387,13 +392,12 @@ func (rf *Raft) commitlogs() {
 	rf.lastApplied = rf.commitIndex
 }
 
-func (rf *Raft) AppendEntries(args *AppendEntryArgs, rep *AppendEntryReply) {
+func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//如果日志小于当前任期号，直接拒绝
 	if args.Term < rf.currentTerm {
 		rep.Term = rf.currentTerm
-		rep.Commitindex = rf.commitIndex
 		rep.Success = false
 		return
 	} else {
@@ -415,6 +419,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, rep *AppendEntryReply) {
 				}
 				rep.Commitindex--
 			}
+			rep.Success = false
 		} else if args.Entries != nil {
 			// 前项日志匹配了，添加日志
 			rf.log = rf.log[:args.Prevlogindex+1]
@@ -439,7 +444,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, rep *AppendEntryReply) {
 	rf.resetTimer()
 }
 
-func (rf *Raft) SendAppendEntryToFollower(server int, args *AppendEntryArgs, rep *AppendEntryReply) bool {
+func (rf *Raft) SendAppendEntryToFollower(server int, args AppendEntryArgs, rep *AppendEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, rep)
 	return ok
 }
@@ -456,14 +461,14 @@ func (rf *Raft) sendAppendToFollower() {
 		if entryargs.Prevlogindex > 0 {
 			entryargs.Prevlogterm = rf.log[entryargs.Prevlogindex].Term
 		}
-		if entryargs.Prevlogindex < len(rf.log) {
+		if rf.nextIndex[i] < len(rf.log) {
 			entryargs.Entries = rf.log[rf.nextIndex[i]:]
 		}
 		entryargs.Leadercommit = rf.commitIndex
 
 		go func(server int, args AppendEntryArgs) {
 			var reply AppendEntryReply
-			ok := rf.SendAppendEntryToFollower(server, &args, &reply)
+			ok := rf.SendAppendEntryToFollower(server, args, &reply)
 			if ok {
 				rf.handleAppendEntries(server, reply)
 			}
@@ -555,8 +560,10 @@ func (rf *Raft) handleTimer() {
 			}
 			go func(server int, arg RequestVoteArgs) {
 				var votereply RequestVoteReply
-				ok := rf.sendRequestVote(server, &arg, &votereply)
+				//fmt.Println("服务器：",rf.me,"发起投票","，任期号",rf.currentTerm)
+				ok := rf.sendRequestVote(server, arg, &votereply)
 				if ok {
+					//fmt.Println("服务器：",rf.me,"任期号",rf.currentTerm,"收到服务器：",server,"投票",votereply)
 					rf.handleVoteResult(votereply)
 				}
 			}(num, args)
