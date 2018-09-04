@@ -19,6 +19,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 const (
+	FOLLOWER  = "follower"
+	CANDIDATE = "candidate"
+	LEADER    = "leader"
+)
+
+const (
 	OpGet    = 0
 	OpPut    = 1
 	OpAppend = 2
@@ -37,6 +43,11 @@ type Op struct {
 	Opid     int64
 }
 
+type WaitingOp struct {
+	waitchan chan bool
+	op       *Op
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -46,12 +57,62 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	data map[string]string //最终kv数据存储位置
+	data         map[string]string    //最终kv数据存储位置
+	waitingforOp map[int][]*WaitingOp //异步等待相应操作完成
+	Opseq        map[int64]int64      //主要是去重，防止多次进行相同操作
+
+}
+
+func (kv *KVServer) Opexec(op Op) bool {
+	index, _, isleader := kv.rf.Start(op)
+	if isleader == false {
+		DPrintf("this is not leader!!")
+		return false
+	}
+
+	waiting := make(chan bool, 1)
+
+	kv.mu.Lock()
+	kv.waitingforOp[index] = append(kv.waitingforOp[index], &WaitingOp{op: &op, waitchan: waiting})
+	kv.mu.Unlock()
+
+	timer := time.NewTimer(Timeout)
+	var ok bool
+	select {
+	case ok = <-waiting:
+	case <-timer.C:
+		DPrintf("KV execute timeout!")
+		ok = false
+	}
+	delete(kv.waitingforOp, index)
+	return ok
 
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{}
+	op.Type = OpGet
+	op.Clientid = args.Clientid
+	op.Opid = args.Opid
+	op.Key = args.Key
+
+	ok := kv.Opexec(op)
+	if ok == false {
+		reply.WrongLeader = true
+		return
+	} else {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		if value, ok := kv.data[args.Key]; ok {
+			reply.Value = value
+			reply.WrongLeader = false
+			reply.Err = OK
+			return
+		} else {
+			reply.Err = ErrNoKey
+		}
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
