@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -17,11 +18,23 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	OpGet    = 0
+	OpPut    = 1
+	OpAppend = 2
+)
+
+const Timeout = time.Second * 3
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Type     int
+	Key      string
+	Value    string
+	Clientid int64
+	Opid     int64
 }
 
 type KVServer struct {
@@ -33,8 +46,9 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-}
+	data map[string]string //最终kv数据存储位置
 
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
