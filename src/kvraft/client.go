@@ -49,7 +49,6 @@ func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
 	var args GetArgs
-	var reply GetReply
 	args.Clientid = ck.Clientid
 	args.Key = key
 	args.Opid = atomic.AddInt64(&ck.Opid, 1)
@@ -57,7 +56,8 @@ func (ck *Clerk) Get(key string) string {
 	n := len(ck.servers)
 	start := ck.Leaderid
 	for {
-		ok := ck.servers[start].Call("KVServer.Get", args, &reply)
+		reply := GetReply{}
+		ok := ck.servers[start].Call("KVServer.Get", &args, &reply)
 		if ok { //只有当成功返回，并且是确定是主库，错误类型为（没有错误或者没有相应键值对）
 			if (reply.Err == OK || reply.Err == ErrNoKey) && reply.WrongLeader == false {
 				DPrintf("ClerK Get %s success, value is %s", args.Key, reply.Value)
@@ -82,7 +82,6 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	var args PutAppendArgs
-	var reply PutAppendReply
 	args.Op = op
 	args.Key = key
 	args.Value = value
@@ -92,10 +91,11 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	n := len(ck.servers)
 	start := ck.Leaderid
 	for {
-		ok := ck.servers[start].Call("KVServer.PutAppend", args, &reply)
+		reply := PutAppendReply{}
+		ok := ck.servers[start].Call("KVServer.PutAppend", &args, &reply)
 		if ok {
 			if reply.Err == OK && reply.WrongLeader == false {
-				DPrintf("Clerk PutAppend success! %s:%s", args.Key, args.Value)
+				DPrintf("Clerk PutAppend success! type:%s,id:%d-%d  %s:%s", args.Op, args.Clientid, args.Opid, args.Key, args.Value)
 				ck.Leaderid = start
 				return
 			}

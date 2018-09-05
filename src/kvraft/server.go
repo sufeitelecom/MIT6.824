@@ -25,9 +25,9 @@ const (
 )
 
 const (
-	OpGet    = 0
-	OpPut    = 1
-	OpAppend = 2
+	OpGet    = "Get"
+	OpPut    = "Put"
+	OpAppend = "Append"
 )
 
 const Timeout = time.Second * 3
@@ -36,7 +36,7 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Type     int
+	Type     string
 	Key      string
 	Value    string
 	Clientid int64
@@ -63,11 +63,12 @@ type KVServer struct {
 
 }
 
-func (kv *KVServer) Opexec(op Op) bool {
+func (kv *KVServer) Opexec(op Op) Err {
+
 	index, _, isleader := kv.rf.Start(op)
 	if isleader == false {
 		DPrintf("this is not leader!!")
-		return false
+		return ErrNotLeader
 	}
 
 	waiting := make(chan bool, 1)
@@ -78,14 +79,22 @@ func (kv *KVServer) Opexec(op Op) bool {
 
 	timer := time.NewTimer(Timeout)
 	var ok bool
+	var res Err
 	select {
 	case ok = <-waiting:
+		if ok {
+			res = OK
+		} else {
+			res = ErrNotLeader
+		}
 	case <-timer.C:
 		DPrintf("KV execute timeout!")
-		ok = false
+		res = ErrTimeout
 	}
+	kv.mu.Lock()
 	delete(kv.waitingforOp, index)
-	return ok
+	kv.mu.Unlock()
+	return res
 
 }
 
@@ -97,26 +106,41 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op.Opid = args.Opid
 	op.Key = args.Key
 
-	ok := kv.Opexec(op)
-	if ok == false {
+	reply.Err = kv.Opexec(op)
+	if reply.Err != OK {
 		reply.WrongLeader = true
 		return
 	} else {
+		reply.WrongLeader = false
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
 		if value, ok := kv.data[args.Key]; ok {
 			reply.Value = value
-			reply.WrongLeader = false
-			reply.Err = OK
 			return
 		} else {
 			reply.Err = ErrNoKey
+			return
 		}
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{}
+	op.Clientid = args.Clientid
+	op.Opid = args.Opid
+	op.Type = args.Op
+	op.Key = args.Key
+	op.Value = args.Value
+
+	reply.Err = kv.Opexec(op)
+	if reply.Err != OK {
+		reply.WrongLeader = true
+		return
+	} else {
+		reply.WrongLeader = false
+		return
+	}
 }
 
 //
@@ -159,6 +183,51 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.data = make(map[string]string)
+	kv.waitingforOp = make(map[int][]*WaitingOp)
+	kv.Opseq = make(map[int64]int64)
 
+	go func() {
+		for {
+			msg := <-kv.applyCh
+			kv.ApplyMsg(msg)
+		}
+	}()
 	return kv
+}
+
+func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	op := msg.Command.(Op)
+	if msg.CommandValid == false {
+		return
+	} else {
+		//检测命令是否可以执行，clienid下opid为空或者大于相应opid（去重）才能执行
+		if index, ok := kv.Opseq[op.Clientid]; !ok || index < op.Opid {
+			switch op.Type {
+			case OpPut:
+				kv.data[op.Key] = op.Value
+			case OpAppend:
+				kv.data[op.Key] = kv.data[op.Key] + op.Value
+			default:
+			}
+			DPrintf("Now {Clientid is %d seqid is %d oriid is %d} ,the data[%s],value is : %s", op.Clientid, op.Opid, kv.Opseq[op.Clientid], op.Key, kv.data[op.Key])
+			kv.Opseq[op.Clientid] = op.Opid
+		} else {
+			DPrintf("Duplicate operation!!")
+		}
+	}
+
+	if waiting, ok := kv.waitingforOp[msg.CommandIndex]; ok {
+		for _, waiter := range waiting {
+			if waiter.op.Clientid == op.Clientid && waiter.op.Opid == op.Opid {
+				waiter.waitchan <- true
+			} else {
+				waiter.waitchan <- false
+			}
+		}
+	}
+
 }
