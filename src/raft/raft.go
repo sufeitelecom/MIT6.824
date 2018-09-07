@@ -44,6 +44,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 }
 
 //定义使用到的常量
@@ -85,7 +86,7 @@ type Raft struct {
 	//服务器粗腰持久化到硬盘的数据
 	currentTerm int
 	voteFor     int
-	log         []LogEntry
+	log         []LogEntry //日志内容，日志从编号0开始
 
 	//所有服务器都应该实时维护的状态信息
 	commitIndex int //已知提交日志中的最大索引id值，小于等于该index的日志都应该提交，初始化为0，单调递增
@@ -96,6 +97,10 @@ type Raft struct {
 	matchIndex []int //已知复制到各follower的最大的日志index
 
 	grantedvotescount int //投票计数
+
+	lastSnapshotindex int //上一次保存最后日志快照对应的index，初始化为-1
+	lastSnapshotterm  int //上一次保存最后日志快照对应的任期号term
+	logindex          int //记录log中下一个index值，初始化为0
 
 	state   string //节点状态
 	applyCh chan ApplyMsg
@@ -138,6 +143,11 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.voteFor)
 	e.Encode(rf.log)
+	e.Encode(rf.commitIndex)
+	e.Encode(rf.lastApplied)
+	e.Encode(rf.lastSnapshotindex)
+	e.Encode(rf.lastSnapshotterm)
+	e.Encode(rf.logindex)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -167,12 +177,23 @@ func (rf *Raft) readPersist(data []byte) {
 	var cur int
 	var vot int
 	var log []LogEntry
-	if d.Decode(&cur) != nil || d.Decode(&vot) != nil || d.Decode(&log) != nil {
+	var commit int
+	var apply int
+	var lastsnap int
+	var lastsnapterm int
+	var logindex int
+	if d.Decode(&cur) != nil || d.Decode(&vot) != nil || d.Decode(&log) != nil || d.Decode(&commit) != nil ||
+		d.Decode(&apply) != nil || d.Decode(&lastsnap) != nil || d.Decode(&lastsnapterm) != nil || d.Decode(&logindex) != nil {
 		panic("read persist error")
 	} else {
 		rf.currentTerm = cur
 		rf.voteFor = vot
 		rf.log = log
+		rf.commitIndex = commit
+		rf.lastApplied = apply
+		rf.lastSnapshotindex = lastsnap
+		rf.lastSnapshotterm = lastsnapterm
+		rf.logindex = logindex
 	}
 
 }
@@ -571,10 +592,13 @@ func (rf *Raft) handleTimer() {
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			Candidateid:  rf.voteFor,
-			Lastlogindex: len(rf.log) - 1,
+			Lastlogindex: rf.logindex - 1,
 		}
 		if len(rf.log) > 0 {
 			args.Lastlogterm = rf.log[len(rf.log)-1].Term
+		} else if len(rf.log) == 0 {
+			args.Lastlogterm = rf.lastSnapshotterm
+			args.Lastlogindex = rf.lastSnapshotindex
 		}
 		//对于每台机器发送选举
 		for num := 0; num < len(rf.peers); num++ {
@@ -621,6 +645,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.commitIndex = -1
 	rf.lastApplied = -1
+
+	rf.lastSnapshotindex = -1
+	rf.lastSnapshotterm = 0
+	rf.logindex = 0
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
