@@ -45,16 +45,15 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 	CommandTerm  int
+	SnapShot     []byte
 }
 
 //定义使用到的常量
 const (
-	STOPPED      = "stopped"
-	INITIALIZED  = "initialized"
 	FOLLOWER     = "follower"
 	CANDIDATE    = "candidate"
 	LEADER       = "leader"
-	SNAPSHOTTING = "snapshotting"
+	LOADSNAPSHOT = "loadsnapshotting"
 )
 
 //相关事件常量
@@ -247,7 +246,7 @@ func (rf *Raft) handleVoteResult(reply RequestVoteReply) {
 				if i == rf.me {
 					continue
 				}
-				rf.nextIndex[i] = len(rf.log)
+				rf.nextIndex[i] = rf.logindex + 1
 				rf.matchIndex[i] = -1
 			}
 			rf.resetTimer()
@@ -275,6 +274,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if len(rf.log) > 0 {
 		if rf.log[len(rf.log)-1].Term > args.Lastlogterm ||
 			(rf.log[len(rf.log)-1].Term == args.Lastlogterm && len(rf.log)-1 > args.Lastlogindex) {
+			may_grant = false
+		}
+	} else if len(rf.log) == 0 {
+		if rf.lastSnapshotterm > args.Lastlogterm || (rf.lastSnapshotterm == args.Lastlogterm && rf.lastSnapshotindex > args.Lastlogindex) {
 			may_grant = false
 		}
 	}
@@ -373,8 +376,14 @@ func (rf *Raft) handleAppendEntries(server int, rep AppendEntryReply) {
 		return
 	}
 	if rep.Success == false {
-		rf.nextIndex[server] = rep.Commitindex + 1
-		rf.sendAppendToFollower()
+		if rep.Commitindex < rf.lastSnapshotindex {
+			DATA := rf.persister.ReadSnapshot()
+			STATE := rf.persister.ReadRaftState()
+			rf.peers[server].Call("Raft.LoadSnap", DATA, STATE)
+		} else {
+			rf.nextIndex[server] = rep.Commitindex + 1
+			rf.sendAppendToFollower()
+		}
 	} else {
 		rf.nextIndex[server] = rep.Commitindex + 1
 		rf.matchIndex[server] = rep.Commitindex
@@ -388,7 +397,7 @@ func (rf *Raft) handleAppendEntries(server int, rep AppendEntryReply) {
 			}
 		}
 		if reply_count >= (len(rf.peers)/2+1) && rf.commitIndex < rf.matchIndex[server] &&
-			rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
+			rf.log[rf.matchIndex[server]-rf.lastSnapshotindex-1].Term == rf.currentTerm {
 			rf.commitIndex = rf.matchIndex[server]
 			//fmt.Println("服务器", rf.me, "提交日志", rf.matchIndex[server])
 			go rf.commitlogs()
@@ -401,15 +410,16 @@ func (rf *Raft) commitlogs() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.commitIndex > len(rf.log)-1 {
-		rf.commitIndex = len(rf.log) - 1
+	if rf.commitIndex > rf.logindex {
+		rf.commitIndex = rf.logindex
 	}
 
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		//fmt.Println("服务器", rf.me, "应用日志", rf.commitIndex)
 		rf.applyCh <- ApplyMsg{
 			CommandIndex: i + 1,
-			Command:      rf.log[i].Command,
+			CommandTerm:  rf.currentTerm,
+			Command:      rf.log[i-rf.lastSnapshotindex-1].Command,
 			CommandValid: true,
 		}
 	}
@@ -432,13 +442,15 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 		rep.Term = rf.currentTerm
 
 		//如果先前的日志不匹配也需要拒绝
-		if args.Prevlogindex >= 0 && (args.Prevlogindex > (len(rf.log)-1) || rf.log[args.Prevlogindex].Term != args.Prevlogterm) {
-			rep.Commitindex = len(rf.log) - 1
+		if args.Prevlogindex >= 0 && (args.Prevlogindex > rf.logindex || args.Prevlogindex < rf.lastSnapshotindex ||
+			args.Prevlogindex == rf.lastSnapshotindex && rf.lastSnapshotterm != args.Term ||
+			args.Prevlogindex > rf.lastSnapshotindex && rf.log[args.Prevlogindex-rf.lastSnapshotindex-1].Term != args.Prevlogterm) {
+			rep.Commitindex = rf.logindex
 			if rep.Commitindex > args.Prevlogindex {
 				rep.Commitindex = args.Prevlogindex
 			}
-			for rep.Commitindex >= 0 {
-				if args.Prevlogterm == rf.log[rep.Commitindex].Term {
+			for rep.Commitindex > rf.lastSnapshotindex {
+				if args.Prevlogterm == rf.log[rep.Commitindex-rf.lastSnapshotindex-1].Term {
 					break
 				}
 				rep.Commitindex--
@@ -446,17 +458,19 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 			rep.Success = false
 		} else if args.Entries != nil {
 			// 前项日志匹配了，添加日志
-			rf.log = rf.log[:args.Prevlogindex+1]
+			rf.log = rf.log[:args.Prevlogindex-rf.lastSnapshotindex]
+			rf.logindex = args.Prevlogindex
 			rf.log = append(rf.log, args.Entries...)
-			if len(rf.log)-1 >= args.Leadercommit {
+			rf.logindex = rf.logindex + len(args.Entries)
+			if rf.logindex >= args.Leadercommit {
 				rf.commitIndex = args.Leadercommit
 				go rf.commitlogs()
 			}
-			rep.Commitindex = len(rf.log) - 1
+			rep.Commitindex = rf.logindex
 			rep.Success = true
 		} else {
 			//心跳
-			if len(rf.log)-1 >= args.Leadercommit {
+			if rf.logindex >= args.Leadercommit {
 				rf.commitIndex = args.Leadercommit
 				//fmt.Println("从服务器提交日志",rf.commitIndex)
 				go rf.commitlogs()
@@ -465,6 +479,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 			rep.Success = true
 		}
 	}
+
 	rf.persist()
 	rf.resetTimer()
 }
@@ -484,10 +499,14 @@ func (rf *Raft) sendAppendToFollower() {
 		entryargs.Leaderid = rf.me
 		entryargs.Prevlogindex = rf.nextIndex[i] - 1
 		if entryargs.Prevlogindex >= 0 {
-			entryargs.Prevlogterm = rf.log[entryargs.Prevlogindex].Term
+			if entryargs.Prevlogindex > rf.lastSnapshotindex {
+				entryargs.Prevlogterm = rf.log[entryargs.Prevlogindex-rf.lastSnapshotindex-1].Term
+			} else if entryargs.Prevlogindex == rf.lastSnapshotindex {
+				entryargs.Prevlogterm = rf.lastSnapshotterm
+			}
 		}
-		if rf.nextIndex[i] < len(rf.log) {
-			entryargs.Entries = rf.log[rf.nextIndex[i]:]
+		if rf.nextIndex[i] <= rf.logindex {
+			entryargs.Entries = rf.log[rf.nextIndex[i]-rf.lastSnapshotindex-1:]
 		}
 		entryargs.Leadercommit = rf.commitIndex
 
@@ -537,11 +556,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	isLeader = (rf.state == LEADER)
 	rf.log = append(rf.log, nlog)
+	rf.logindex = rf.logindex + 1
 	term = rf.currentTerm
-	index = len(rf.log)
+	index = rf.logindex
 	rf.persist()
 
-	return index, term, isLeader
+	return index + 1, term, isLeader
 }
 
 //
@@ -592,7 +612,7 @@ func (rf *Raft) handleTimer() {
 		args := RequestVoteArgs{
 			Term:         rf.currentTerm,
 			Candidateid:  rf.voteFor,
-			Lastlogindex: rf.logindex - 1,
+			Lastlogindex: rf.logindex,
 		}
 		if len(rf.log) > 0 {
 			args.Lastlogterm = rf.log[len(rf.log)-1].Term
@@ -647,8 +667,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = -1
 
 	rf.lastSnapshotindex = -1
-	rf.lastSnapshotterm = 0
-	rf.logindex = 0
+	rf.lastSnapshotterm = 0 //任期编号从1开始
+	rf.logindex = -1        //日志索引从0开始
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -663,4 +683,34 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetTimer()
 
 	return rf
+}
+
+func (rf *Raft) SaveSnapShotAndState(data []byte, index int, term int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.log = rf.log[index-rf.lastSnapshotindex:]
+	rf.lastSnapshotindex = index
+	rf.lastSnapshotterm = term
+	rf.persist()
+	state := rf.persister.ReadRaftState()
+	rf.persister.SaveStateAndSnapshot(state, data)
+}
+
+func (rf *Raft) LoadSnap(Data []byte, State []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.readPersist(State)
+	rf.applyCh <- ApplyMsg{
+		CommandTerm:  rf.currentTerm,
+		SnapShot:     Data,
+		Command:      LOADSNAPSHOT,
+		CommandValid: false,
+	}
+	rf.persist()
+}
+
+func (rf *Raft) Getpersister() *Persister {
+	return rf.persister
 }

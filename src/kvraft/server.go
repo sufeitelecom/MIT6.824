@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
@@ -19,9 +20,10 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 const (
-	FOLLOWER  = "follower"
-	CANDIDATE = "candidate"
-	LEADER    = "leader"
+	FOLLOWER     = "follower"
+	CANDIDATE    = "candidate"
+	LEADER       = "leader"
+	LOADSNAPSHOT = "loadsnapshotting"
 )
 
 const (
@@ -60,7 +62,8 @@ type KVServer struct {
 	data         map[string]string    //最终kv数据存储位置
 	waitingforOp map[int][]*WaitingOp //异步等待相应操作完成
 	Opseq        map[int64]int64      //主要是去重，防止多次进行相同操作
-
+	term         int                  //kv服务器已经应用到的日志任期号和index （初始化都为0，kv的指令从1开始计数，index比raft中大一）
+	index        int
 }
 
 func (kv *KVServer) Opexec(op Op) Err {
@@ -176,6 +179,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.term = 0
+	kv.index = 0
 
 	// You may need initialization code here.
 
@@ -186,6 +191,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.waitingforOp = make(map[int][]*WaitingOp)
 	kv.Opseq = make(map[int64]int64)
+
+	kv.loaddata(persister.ReadSnapshot())
 
 	go func() {
 		for {
@@ -202,6 +209,9 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 
 	op := msg.Command.(Op)
 	if msg.CommandValid == false {
+		if msg.Command == LOADSNAPSHOT {
+			kv.loaddata(msg.SnapShot)
+		}
 		return
 	} else {
 		//检测命令是否可以执行，clienid下opid为空或者大于相应opid（去重）才能执行
@@ -215,6 +225,8 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 			}
 			DPrintf("Now {Clientid is %d seqid is %d oriid is %d} ,the data[%s],value is : %s", op.Clientid, op.Opid, kv.Opseq[op.Clientid], op.Key, kv.data[op.Key])
 			kv.Opseq[op.Clientid] = op.Opid
+			kv.term = msg.CommandTerm
+			kv.index = msg.CommandIndex
 		} else {
 			DPrintf("Duplicate operation!!")
 		}
@@ -229,5 +241,37 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 			}
 		}
 	}
+	if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
+		data := kv.persistdata()
+		kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
+	}
+}
 
+func (kv *KVServer) loaddata(data []byte) {
+
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	var res map[string]string
+	var term int
+	var index int
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&res) != nil || d.Decode(&term) != nil || d.Decode(&index) != nil {
+		panic("read data error")
+	} else {
+		kv.data = res
+		kv.term = term
+		kv.index = index
+	}
+}
+
+func (kv *KVServer) persistdata() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.data)
+	e.Encode(kv.term)
+	e.Encode(kv.index)
+	data := w.Bytes()
+	return data
 }
