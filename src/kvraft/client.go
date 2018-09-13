@@ -60,7 +60,7 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[start].Call("KVServer.Get", &args, &reply)
 		if ok { //只有当成功返回，并且是确定是主库，错误类型为（没有错误或者没有相应键值对）
 			if (reply.Err == OK || reply.Err == ErrNoKey) && reply.WrongLeader == false {
-				DPrintf("ClerK Get %s success, value is %s", args.Key, reply.Value)
+				DPrintf("Master: %d ClerK Get %s success, value is %s", start, args.Key, reply.Value)
 				ck.Leaderid = start
 				return reply.Value
 			}
@@ -95,7 +95,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ok := ck.servers[start].Call("KVServer.PutAppend", &args, &reply)
 		if ok {
 			if reply.Err == OK && reply.WrongLeader == false {
-				DPrintf("Clerk PutAppend success! type:%s,id:%d-%d  %s:%s", args.Op, args.Clientid, args.Opid, args.Key, args.Value)
+				DPrintf("Master: %d Clerk PutAppend success! type:%s,id:%d-%d  %s:%s", start, args.Op, args.Clientid, args.Opid, args.Key, args.Value)
 				ck.Leaderid = start
 				return
 			}

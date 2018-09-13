@@ -41,11 +41,13 @@ import (
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
 type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
-	CommandTerm  int
-	SnapShot     []byte
+	CommandValid  bool
+	Command       interface{}
+	CommandIndex  int
+	CommandTerm   int
+	SnapShot      []byte
+	SnapShotIndex int
+	SnapShotTerm  int
 }
 
 type InstallSnap struct {
@@ -709,7 +711,6 @@ func (rf *Raft) SaveSnapShotAndState(data []byte, index int, term int) {
 	rf.lastSnapshotterm = term
 	rf.lastApplied = index
 	rf.commitIndex = index
-	rf.logindex = index + len(rf.log)
 	rf.persist()
 	state := rf.persister.ReadRaftState()
 	rf.persister.SaveStateAndSnapshot(state, data)
@@ -727,10 +728,12 @@ func (rf *Raft) LoadSnap(Snap InstallSnap, SnapReply *InstallSnapReply) {
 
 	rf.readPersist(Snap.State)
 	rf.applyCh <- ApplyMsg{
-		CommandTerm:  rf.currentTerm,
-		SnapShot:     Snap.Data,
-		Command:      LOADSNAPSHOT,
-		CommandValid: false,
+		CommandTerm:   rf.currentTerm,
+		SnapShot:      Snap.Data,
+		SnapShotIndex: rf.lastSnapshotindex,
+		SnapShotTerm:  rf.lastSnapshotterm,
+		Command:       LOADSNAPSHOT,
+		CommandValid:  false,
 	}
 	SnapReply.Term = rf.currentTerm
 	SnapReply.Ok = true

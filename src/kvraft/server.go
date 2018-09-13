@@ -188,7 +188,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.waitingforOp = make(map[int][]*WaitingOp)
 	kv.Opseq = make(map[int64]int64)
-
+	DPrintf("\n START KV server %d !!!!!!!!!!!!!!!!!!!! \n", kv.me)
 	kv.loaddata(persister.ReadSnapshot())
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
@@ -207,7 +207,10 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 
 	if msg.CommandValid == false {
 		if msg.Command == LOADSNAPSHOT {
-			kv.loaddata(msg.SnapShot)
+			if msg.SnapShotTerm > kv.term || (msg.SnapShotTerm == kv.term && msg.SnapShotIndex > (kv.index-1)) {
+				DPrintf("\n sever ", kv.me, "\nMSG: TERM,INDEX", msg.SnapShotTerm, msg.SnapShotIndex, "\n kv: term,index", kv.term, kv.index)
+				kv.loaddata(msg.SnapShot)
+			}
 		}
 		return
 	} else {
@@ -221,7 +224,7 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 				kv.data[op.Key] = kv.data[op.Key] + op.Value
 			default:
 			}
-			DPrintf("Now {Clientid is %d seqid is %d oriid is %d} ,the data[%s],value is : %s", op.Clientid, op.Opid, kv.Opseq[op.Clientid], op.Key, kv.data[op.Key])
+			DPrintf("Now server %d {Clientid is %d seqid is %d oriid is %d} ,the data[%s],value is : %s", kv.me, op.Clientid, op.Opid, kv.Opseq[op.Clientid], op.Key, kv.data[op.Key])
 			kv.Opseq[op.Clientid] = op.Opid
 			kv.term = msg.CommandTerm
 			kv.index = msg.CommandIndex
@@ -237,11 +240,11 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 				}
 			}
 		}
-	}
-
-	if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
-		data := kv.persistdata()
-		go kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
+		if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
+			DPrintf("\n sever ", kv.me, "\nSTART store snap :\n", kv.data, "---------------\n", kv.Opseq)
+			data := kv.persistdata()
+			go kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
+		}
 	}
 }
 
@@ -264,6 +267,7 @@ func (kv *KVServer) loaddata(data []byte) {
 		kv.index = index
 		kv.Opseq = seq
 	}
+	DPrintf("\n sever ", kv.me, "\nSTART read snap :\n", kv.data, "+++++++++++++++++++++\n", kv.Opseq)
 }
 
 func (kv *KVServer) persistdata() []byte {
