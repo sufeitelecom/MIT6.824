@@ -48,6 +48,16 @@ type ApplyMsg struct {
 	SnapShot     []byte
 }
 
+type InstallSnap struct {
+	Term  int
+	Data  []byte
+	State []byte
+}
+type InstallSnapReply struct {
+	Term int
+	Ok   bool
+}
+
 //定义使用到的常量
 const (
 	FOLLOWER     = "follower"
@@ -142,8 +152,6 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.voteFor)
 	e.Encode(rf.log)
-	e.Encode(rf.commitIndex)
-	e.Encode(rf.lastApplied)
 	e.Encode(rf.lastSnapshotindex)
 	e.Encode(rf.lastSnapshotterm)
 	e.Encode(rf.logindex)
@@ -176,20 +184,16 @@ func (rf *Raft) readPersist(data []byte) {
 	var cur int
 	var vot int
 	var log []LogEntry
-	var commit int
-	var apply int
 	var lastsnap int
 	var lastsnapterm int
 	var logindex int
-	if d.Decode(&cur) != nil || d.Decode(&vot) != nil || d.Decode(&log) != nil || d.Decode(&commit) != nil ||
-		d.Decode(&apply) != nil || d.Decode(&lastsnap) != nil || d.Decode(&lastsnapterm) != nil || d.Decode(&logindex) != nil {
+	if d.Decode(&cur) != nil || d.Decode(&vot) != nil || d.Decode(&log) != nil ||
+		d.Decode(&lastsnap) != nil || d.Decode(&lastsnapterm) != nil || d.Decode(&logindex) != nil {
 		panic("read persist error")
 	} else {
 		rf.currentTerm = cur
 		rf.voteFor = vot
 		rf.log = log
-		rf.commitIndex = commit
-		rf.lastApplied = apply
 		rf.lastSnapshotindex = lastsnap
 		rf.lastSnapshotterm = lastsnapterm
 		rf.logindex = logindex
@@ -377,9 +381,12 @@ func (rf *Raft) handleAppendEntries(server int, rep AppendEntryReply) {
 	}
 	if rep.Success == false {
 		if rep.Commitindex < rf.lastSnapshotindex {
-			DATA := rf.persister.ReadSnapshot()
-			STATE := rf.persister.ReadRaftState()
-			rf.peers[server].Call("Raft.LoadSnap", DATA, STATE)
+			var installsnap InstallSnap
+			installsnap.Data = rf.persister.ReadSnapshot()
+			installsnap.State = rf.persister.ReadRaftState()
+			installsnap.Term = rf.currentTerm
+			var ok InstallSnapReply
+			rf.peers[server].Call("Raft.LoadSnap", installsnap, &ok)
 		} else {
 			rf.nextIndex[server] = rep.Commitindex + 1
 			rf.sendAppendToFollower()
@@ -412,6 +419,10 @@ func (rf *Raft) commitlogs() {
 
 	if rf.commitIndex > rf.logindex {
 		rf.commitIndex = rf.logindex
+	}
+
+	if rf.lastApplied < rf.lastSnapshotindex {
+		rf.lastApplied = rf.lastSnapshotindex
 	}
 
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
@@ -505,7 +516,7 @@ func (rf *Raft) sendAppendToFollower() {
 				entryargs.Prevlogterm = rf.lastSnapshotterm
 			}
 		}
-		if rf.nextIndex[i] <= rf.logindex {
+		if rf.nextIndex[i] <= rf.logindex && rf.nextIndex[i] > rf.lastSnapshotindex {
 			entryargs.Entries = rf.log[rf.nextIndex[i]-rf.lastSnapshotindex-1:]
 		}
 		entryargs.Leadercommit = rf.commitIndex
@@ -689,26 +700,42 @@ func (rf *Raft) SaveSnapShotAndState(data []byte, index int, term int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	if rf.lastSnapshotindex > index {
+		return
+	}
+
 	rf.log = rf.log[index-rf.lastSnapshotindex:]
 	rf.lastSnapshotindex = index
 	rf.lastSnapshotterm = term
+	rf.lastApplied = index
+	rf.commitIndex = index
+	rf.logindex = index + len(rf.log)
 	rf.persist()
 	state := rf.persister.ReadRaftState()
 	rf.persister.SaveStateAndSnapshot(state, data)
 }
 
-func (rf *Raft) LoadSnap(Data []byte, State []byte) {
+func (rf *Raft) LoadSnap(Snap InstallSnap, SnapReply *InstallSnapReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.readPersist(State)
+	if Snap.Term < rf.currentTerm {
+		SnapReply.Term = rf.currentTerm
+		SnapReply.Ok = false
+		return
+	}
+
+	rf.readPersist(Snap.State)
 	rf.applyCh <- ApplyMsg{
 		CommandTerm:  rf.currentTerm,
-		SnapShot:     Data,
+		SnapShot:     Snap.Data,
 		Command:      LOADSNAPSHOT,
 		CommandValid: false,
 	}
+	SnapReply.Term = rf.currentTerm
+	SnapReply.Ok = true
 	rf.persist()
+	return
 }
 
 func (rf *Raft) Getpersister() *Persister {

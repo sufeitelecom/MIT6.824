@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -70,7 +70,7 @@ func (kv *KVServer) Opexec(op Op) Err {
 
 	index, _, isleader := kv.rf.Start(op)
 	if isleader == false {
-		DPrintf("this is not leader!!")
+		DPrintf("server ", kv.me, "this is not leader!!")
 		return ErrNotLeader
 	}
 
@@ -185,14 +185,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	// You may need initialization code here.
 	kv.data = make(map[string]string)
 	kv.waitingforOp = make(map[int][]*WaitingOp)
 	kv.Opseq = make(map[int64]int64)
 
 	kv.loaddata(persister.ReadSnapshot())
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	go func() {
 		for {
@@ -207,13 +205,13 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	op := msg.Command.(Op)
 	if msg.CommandValid == false {
 		if msg.Command == LOADSNAPSHOT {
 			kv.loaddata(msg.SnapShot)
 		}
 		return
 	} else {
+		op := msg.Command.(Op)
 		//检测命令是否可以执行，clienid下opid为空或者大于相应opid（去重）才能执行
 		if index, ok := kv.Opseq[op.Clientid]; !ok || index < op.Opid {
 			switch op.Type {
@@ -230,20 +228,20 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 		} else {
 			DPrintf("Duplicate operation!!")
 		}
-	}
-
-	if waiting, ok := kv.waitingforOp[msg.CommandIndex]; ok {
-		for _, waiter := range waiting {
-			if waiter.op.Clientid == op.Clientid && waiter.op.Opid == op.Opid {
-				waiter.waitchan <- true
-			} else {
-				waiter.waitchan <- false
+		if waiting, ok := kv.waitingforOp[msg.CommandIndex]; ok {
+			for _, waiter := range waiting {
+				if waiter.op.Clientid == op.Clientid && waiter.op.Opid == op.Opid {
+					waiter.waitchan <- true
+				} else {
+					waiter.waitchan <- false
+				}
 			}
 		}
 	}
+
 	if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
 		data := kv.persistdata()
-		kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
+		go kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
 	}
 }
 
@@ -255,14 +253,16 @@ func (kv *KVServer) loaddata(data []byte) {
 	var res map[string]string
 	var term int
 	var index int
+	var seq map[int64]int64
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if d.Decode(&res) != nil || d.Decode(&term) != nil || d.Decode(&index) != nil {
+	if d.Decode(&res) != nil || d.Decode(&term) != nil || d.Decode(&index) != nil || d.Decode(&seq) != nil {
 		panic("read data error")
 	} else {
 		kv.data = res
 		kv.term = term
 		kv.index = index
+		kv.Opseq = seq
 	}
 }
 
@@ -272,6 +272,7 @@ func (kv *KVServer) persistdata() []byte {
 	e.Encode(kv.data)
 	e.Encode(kv.term)
 	e.Encode(kv.index)
+	e.Encode(kv.Opseq)
 	data := w.Bytes()
 	return data
 }
