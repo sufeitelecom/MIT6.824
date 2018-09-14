@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -240,11 +240,11 @@ func (kv *KVServer) ApplyMsg(msg raft.ApplyMsg) {
 				}
 			}
 		}
-		if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
-			DPrintf("\n sever ", kv.me, "\nSTART store snap :\n", kv.data, "---------------\n", kv.Opseq)
-			data := kv.persistdata()
-			go kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
-		}
+	}
+	if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
+		DPrintf("\n sever ", kv.me, "\nSTART store snap :\n", kv.data, "---------------\n", kv.Opseq)
+		data := kv.persistdata()
+		go kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
 	}
 }
 

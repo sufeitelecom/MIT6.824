@@ -725,6 +725,8 @@ func (rf *Raft) LoadSnap(Snap InstallSnap, SnapReply *InstallSnapReply) {
 		SnapReply.Ok = false
 		return
 	}
+	//首先应该将快照存入磁盘，以免在加载过程中服务器重启，造成快照（旧的）与状态不一致
+	rf.persister.SaveStateAndSnapshot(Snap.State, Snap.Data)
 
 	rf.readPersist(Snap.State)
 	rf.applyCh <- ApplyMsg{
