@@ -12,6 +12,8 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	ClientId    int64
+	LastQueryId int64
 }
 
 func nrand() int64 {
@@ -25,6 +27,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.ClientId = nrand()
+	ck.LastQueryId = 0
 	return ck
 }
 
@@ -48,7 +52,10 @@ func (ck *Clerk) Query(num int) Config {
 func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
+	args.QueryId = time.Now().UnixNano() - ck.ClientId //获得单调递增的queryid
+	args.LastQueryId = ck.LastQueryId
 	args.Servers = servers
+	ck.LastQueryId = args.QueryId
 
 	for {
 		// try each known server.
@@ -61,11 +68,14 @@ func (ck *Clerk) Join(servers map[int][]string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+
 }
 
 func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
+	args.QueryId = time.Now().UnixNano() - ck.ClientId //获得单调递增的queryid
+	args.LastQueryId = ck.LastQueryId
 	args.GIDs = gids
 
 	for {
@@ -84,6 +94,8 @@ func (ck *Clerk) Leave(gids []int) {
 func (ck *Clerk) Move(shard int, gid int) {
 	args := &MoveArgs{}
 	// Your code here.
+	args.QueryId = time.Now().UnixNano() - ck.ClientId //获得单调递增的queryid
+	args.LastQueryId = ck.LastQueryId
 	args.Shard = shard
 	args.GID = gid
 
