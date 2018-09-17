@@ -77,6 +77,7 @@ func (ck *Clerk) Leave(gids []int) {
 	args.QueryId = time.Now().UnixNano() - ck.ClientId //获得单调递增的queryid
 	args.LastQueryId = ck.LastQueryId
 	args.GIDs = gids
+	ck.LastQueryId = args.QueryId
 
 	for {
 		// try each known server.

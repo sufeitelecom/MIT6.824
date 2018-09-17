@@ -35,7 +35,7 @@ type ShardMaster struct {
 
 	configs      []Config             // indexed by config num
 	waitingforOp map[int][]*WaitingOp //异步等待相应操作完成
-	dupremove    map[int64]int64      // 去重
+	dupremove    map[int64]struct{}   // 去重
 }
 
 type Op struct {
@@ -79,18 +79,55 @@ func (sm *ShardMaster) ExecOp(op Op) Err {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
+	arg := Op{Type: JOIN, Command: args}
+	reply.Err = sm.ExecOp(arg)
+	if reply.Err != OK {
+		reply.WrongLeader = true
+		return
+	} else {
+		reply.WrongLeader = false
+		return
+	}
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	arg := Op{Type: Leave, Command: args}
+	reply.Err = sm.ExecOp(arg)
+	if reply.Err != OK {
+		reply.WrongLeader = true
+		return
+	} else {
+		reply.WrongLeader = false
+		return
+	}
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	arg := Op{Type: MOVE, Command: args}
+	reply.Err = sm.ExecOp(arg)
+	if reply.Err != OK {
+		reply.WrongLeader = true
+		return
+	} else {
+		reply.WrongLeader = false
+		return
+	}
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	arg := Op{Type: QUERY, Command: args}
+	reply.Err = sm.ExecOp(arg)
+	if reply.Err != OK {
+		reply.WrongLeader = true
+		return
+	} else {
+		reply.WrongLeader = false
+		reply.Config = sm.configs[args.Num]
+		return
+	}
 }
 
 //
@@ -127,6 +164,29 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	// Your code here.
+	sm.waitingforOp = make(map[int][]*WaitingOp)
+	sm.dupremove = make(map[int64]struct{}) // 去重
+
+	go func() {
+		for {
+			msg := <-sm.applyCh
+			sm.Apply(msg)
+		}
+	}()
 
 	return sm
+}
+
+func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
+	if msg.CommandValid == false {
+		return
+	} else {
+		op := msg.Command.(Op)
+		switch op.Type {
+		case JOIN:
+		case Leave:
+		case MOVE:
+		default:
+		}
+	}
 }
