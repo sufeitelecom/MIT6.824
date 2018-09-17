@@ -24,12 +24,18 @@ const NShards = 10
 // Please don't change this.
 type Config struct {
 	Num    int              // config number
-	Shards [NShards]int     // shard -> gid
-	Groups map[int][]string // gid -> servers[]
+	Shards [NShards]int     // shard -> gid     // 各分片对应的组情况
+	Groups map[int][]string // gid -> servers[] // 组情况
 }
 
 const (
-	OK = "OK"
+	JOIN         = "join"
+	Leave        = "leave"
+	MOVE         = "move"
+	QUERY        = "query"
+	OK           = "OK"
+	ErrNotLeader = "ErrNotLeader"
+	ErrTimeout   = "ErrTimeOut"
 )
 
 type Err string
