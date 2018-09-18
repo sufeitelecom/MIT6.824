@@ -35,13 +35,15 @@ type ShardMaster struct {
 
 	configs      []Config             // indexed by config num
 	waitingforOp map[int][]*WaitingOp //异步等待相应操作完成
-	dupremove    map[int64]struct{}   // 去重
+	dupremove    map[int64]int64      // 去重
 }
 
 type Op struct {
 	// Your data here.
-	Type    string
-	Command interface{}
+	Type     string
+	Clientid int64
+	Queryid  int64
+	Command  interface{}
 }
 
 func (sm *ShardMaster) ExecOp(op Op) Err {
@@ -68,7 +70,7 @@ func (sm *ShardMaster) ExecOp(op Op) Err {
 			res = ErrNotLeader
 		}
 	case <-timer.C:
-		DPrintf("KV execute timeout!")
+		DPrintf("SM execute timeout!")
 		res = ErrTimeout
 	}
 	sm.mu.Lock()
@@ -79,7 +81,7 @@ func (sm *ShardMaster) ExecOp(op Op) Err {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
-	arg := Op{Type: JOIN, Command: args}
+	arg := Op{Type: JOIN, Clientid: args.ClientId, Queryid: args.QueryId, Command: args}
 	reply.Err = sm.ExecOp(arg)
 	if reply.Err != OK {
 		reply.WrongLeader = true
@@ -92,7 +94,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
-	arg := Op{Type: Leave, Command: args}
+	arg := Op{Type: Leave, Clientid: args.ClientId, Queryid: args.QueryId, Command: args}
 	reply.Err = sm.ExecOp(arg)
 	if reply.Err != OK {
 		reply.WrongLeader = true
@@ -105,7 +107,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
-	arg := Op{Type: MOVE, Command: args}
+	arg := Op{Type: MOVE, Clientid: args.ClientId, Queryid: args.QueryId, Command: args}
 	reply.Err = sm.ExecOp(arg)
 	if reply.Err != OK {
 		reply.WrongLeader = true
@@ -125,8 +127,15 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		return
 	} else {
 		reply.WrongLeader = false
-		reply.Config = sm.configs[args.Num]
-		return
+		sm.mu.Lock()
+		defer sm.mu.Unlock()
+		if len(sm.configs) > args.Num {
+			reply.Config = sm.configs[args.Num]
+			return
+		} else {
+			reply.Err = ErrNoNum
+			return
+		}
 	}
 }
 
@@ -165,7 +174,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	// Your code here.
 	sm.waitingforOp = make(map[int][]*WaitingOp)
-	sm.dupremove = make(map[int64]struct{}) // 去重
+	sm.dupremove = make(map[int64]int64) // 去重
 
 	go func() {
 		for {
@@ -178,15 +187,100 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 }
 
 func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
 	if msg.CommandValid == false {
 		return
 	} else {
 		op := msg.Command.(Op)
-		switch op.Type {
-		case JOIN:
-		case Leave:
-		case MOVE:
-		default:
+		if index, ok := sm.dupremove[op.Clientid]; !ok || index < op.Queryid {
+			switch op.Type {
+			case JOIN:
+				jion := op.Command.(JoinArgs)
+				newconf := sm.getconfig(-1)
+				NewShards := make([]int, 0) //记录新加入的gid
+				//初始化Groups
+				for gid, servers := range jion.Servers {
+					if _, ok := newconf.Groups[gid]; ok {
+						newconf.Groups[gid] = append(newconf.Groups[gid], servers...)
+					} else {
+						newconf.Groups[gid] = append([]string{}, servers...)
+						NewShards = append(NewShards, gid)
+					}
+				}
+				//下面进行分片重新分配，也就是初始化Shards [NShards]int结构: shard->group
+				if len(newconf.Groups) == 0 {
+					newconf.Shards = [NShards]int{}
+				} else {
+					var minShardNum, maxShardNum, maxShardNumCount int
+					ShardNum := make(map[int]int) //记录每个gid的shard数（分片数）
+					minShardNum = NShards / len(newconf.Groups)
+					if maxShardNumCount = NShards % len(newconf.Groups); maxShardNumCount != 0 {
+						maxShardNum = minShardNum + 1
+					} else {
+						maxShardNum = minShardNum
+					}
+					for i, j := 0, 0; i < NShards; i++ {
+						gid := newconf.Shards[i]
+						//为了尽量少移动各分片，所以只移动超过的部分
+						//1、没有分配的直接放入新的gid中
+						//2、超过最大分片数的需要重新分配
+						if gid == 0 ||
+							(minShardNum == maxShardNum && ShardNum[gid] == minShardNum) ||
+							(minShardNum < maxShardNum && ShardNum[gid] == minShardNum && maxShardNumCount >= 0) {
+							newgid := NewShards[j]
+							newconf.Shards[i] = newgid
+							ShardNum[gid] += 1
+							j = (j + 1) / len(NewShards) //这里主要是为了循环分配给每个新加入的group
+						} else { //其他情况保持原来的分配
+							ShardNum[gid] += 1
+							if ShardNum[gid] == minShardNum {
+								maxShardNumCount -= 1
+							}
+						}
+					}
+				}
+				//最后将新的conf配置添加到配置中
+				sm.appendNewconf(newconf)
+			case Leave:
+			case MOVE:
+			case QUERY:
+			default:
+			}
+			sm.dupremove[op.Clientid] = op.Queryid
+		} else {
+			DPrintf("Duplicate operation!!")
+		}
+		if waiting, ok := sm.waitingforOp[msg.CommandIndex]; ok {
+			for _, waiter := range waiting {
+				if waiter.op.Clientid == op.Clientid && waiter.op.Queryid == op.Queryid {
+					waiter.waitchan <- true
+				} else {
+					waiter.waitchan <- false
+				}
+			}
 		}
 	}
+}
+
+// 调用者持锁
+func (sm *ShardMaster) getconfig(num int) Config {
+	len := len(sm.configs)
+	var src Config
+	if num < 0 || num >= len {
+		src = sm.configs[len-1]
+	} else {
+		src = sm.configs[num]
+	}
+	dst := Config{Num: src.Num, Shards: src.Shards, Groups: make(map[int][]string)}
+	for git, servers := range dst.Groups {
+		dst.Groups[git] = append([]string{}, servers...)
+	}
+	return dst
+}
+
+func (sm *ShardMaster) appendNewconf(conf Config) {
+	conf.Num = len(sm.configs)
+	sm.configs = append(sm.configs, conf)
 }

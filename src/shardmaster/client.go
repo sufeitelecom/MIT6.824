@@ -7,7 +7,10 @@ package shardmaster
 import "labrpc"
 import "time"
 import "crypto/rand"
-import "math/big"
+import (
+	"math/big"
+	"sync/atomic"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -33,9 +36,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
+	args := &QueryArgs{ClientId: ck.ClientId, Num: num}
+	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -50,12 +52,9 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	args := &JoinArgs{ClientId: ck.ClientId, Servers: servers}
 	// Your code here.
-	args.QueryId = time.Now().UnixNano() - ck.ClientId //获得单调递增的queryid
-	args.LastQueryId = ck.LastQueryId
-	args.Servers = servers
-	ck.LastQueryId = args.QueryId
+	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		// try each known server.
@@ -68,16 +67,12 @@ func (ck *Clerk) Join(servers map[int][]string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
+	args := &LeaveArgs{ClientId: ck.ClientId, GIDs: gids}
 	// Your code here.
-	args.QueryId = time.Now().UnixNano() - ck.ClientId //获得单调递增的queryid
-	args.LastQueryId = ck.LastQueryId
-	args.GIDs = gids
-	ck.LastQueryId = args.QueryId
+	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		// try each known server.
@@ -93,12 +88,9 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
+	args := &MoveArgs{ClientId: ck.ClientId, Shard: shard, GID: gid}
 	// Your code here.
-	args.QueryId = time.Now().UnixNano() - ck.ClientId //获得单调递增的queryid
-	args.LastQueryId = ck.LastQueryId
-	args.Shard = shard
-	args.GID = gid
+	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		// try each known server.
