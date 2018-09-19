@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -40,7 +40,7 @@ type ShardMaster struct {
 
 type Op struct {
 	// Your data here.
-	Type     string
+	Type     RequestType
 	Clientid int64
 	Queryid  int64
 	Command  interface{}
@@ -52,7 +52,7 @@ func (sm *ShardMaster) ExecOp(op Op) Err {
 		DPrintf("This server is not leader , server number is %v", sm.me)
 		return ErrNotLeader
 	}
-
+	DPrintf("This server is leader , server number is %v", sm.me)
 	waiting := make(chan bool, 1)
 
 	sm.mu.Lock()
@@ -81,7 +81,11 @@ func (sm *ShardMaster) ExecOp(op Op) Err {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
-	arg := Op{Type: JOIN, Clientid: args.ClientId, Queryid: args.QueryId, Command: args}
+	join := JoinArgs{ClientId: args.ClientId, QueryId: args.QueryId, Servers: make(map[int][]string)}
+	for gid, server := range args.Servers {
+		join.Servers[gid] = append([]string{}, server...)
+	}
+	arg := Op{Type: JOIN, Clientid: args.ClientId, Queryid: args.QueryId, Command: join}
 	reply.Err = sm.ExecOp(arg)
 	if reply.Err != OK {
 		reply.WrongLeader = true
@@ -94,7 +98,8 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
-	arg := Op{Type: Leave, Clientid: args.ClientId, Queryid: args.QueryId, Command: args}
+	leave := LeaveArgs{ClientId: args.ClientId, QueryId: args.QueryId, GIDs: append([]int{}, args.GIDs...)}
+	arg := Op{Type: Leave, Clientid: args.ClientId, Queryid: args.QueryId, Command: leave}
 	reply.Err = sm.ExecOp(arg)
 	if reply.Err != OK {
 		reply.WrongLeader = true
@@ -107,7 +112,8 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
-	arg := Op{Type: MOVE, Clientid: args.ClientId, Queryid: args.QueryId, Command: args}
+	move := MoveArgs{ClientId: args.ClientId, QueryId: args.ClientId, GID: args.GID, Shard: args.Shard}
+	arg := Op{Type: MOVE, Clientid: args.ClientId, Queryid: args.QueryId, Command: move}
 	reply.Err = sm.ExecOp(arg)
 	if reply.Err != OK {
 		reply.WrongLeader = true
@@ -120,7 +126,8 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
-	arg := Op{Type: QUERY, Command: args}
+	query := QueryArgs{ClientId: args.ClientId, QueryId: args.QueryId, Num: args.Num}
+	arg := Op{Type: QUERY, Clientid: args.ClientId, Queryid: args.QueryId, Command: query}
 	reply.Err = sm.ExecOp(arg)
 	if reply.Err != OK {
 		reply.WrongLeader = true
@@ -130,7 +137,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		sm.mu.Lock()
 		defer sm.mu.Unlock()
 		if len(sm.configs) > args.Num {
-			reply.Config = sm.configs[args.Num]
+			reply.Config = sm.getconfig(args.Num)
 			return
 		} else {
 			reply.Err = ErrNoNum
@@ -193,6 +200,7 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 	if msg.CommandValid == false {
 		return
 	} else {
+		DPrintf("op is %v, server number is %d", msg, sm.me)
 		op := msg.Command.(Op)
 		if index, ok := sm.dupremove[op.Clientid]; !ok || index < op.Queryid {
 			switch op.Type {
@@ -228,14 +236,14 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 						//2、超过最大分片数的需要重新分配
 						if gid == 0 ||
 							(minShardNum == maxShardNum && ShardNum[gid] == minShardNum) ||
-							(minShardNum < maxShardNum && ShardNum[gid] == minShardNum && maxShardNumCount >= 0) {
+							(minShardNum < maxShardNum && ShardNum[gid] == minShardNum && maxShardNumCount <= 0) {
 							newgid := NewShards[j]
 							newconf.Shards[i] = newgid
 							ShardNum[gid] += 1
-							j = (j + 1) / len(NewShards) //这里主要是为了循环分配给每个新加入的group
+							j = (j + 1) % len(NewShards) //这里主要是为了循环分配给每个新加入的group
 						} else { //其他情况保持原来的分配
 							ShardNum[gid] += 1
-							if ShardNum[gid] == minShardNum {
+							if minShardNum < maxShardNum && ShardNum[gid] == maxShardNum {
 								maxShardNumCount -= 1
 							}
 						}
@@ -244,8 +252,38 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 				//最后将新的conf配置添加到配置中
 				sm.appendNewconf(newconf)
 			case Leave:
+				leave := msg.Command.(LeaveArgs)
+				newconf := sm.getconfig(-1)
+				keepgid := make([]int, 0) //记录剩下来的gid
+				leavegid := make(map[int]struct{}, 0)
+				for gid := range leave.GIDs {
+					delete(newconf.Groups, gid)
+					leavegid[gid] = struct{}{}
+				}
+				for gid := range newconf.Groups {
+					keepgid = append(keepgid, gid)
+				}
+
+				if len(newconf.Groups) == 0 {
+					newconf.Shards = [NShards]int{}
+				} else {
+					for i, j := 0, 0; i < NShards; i++ {
+						gid := newconf.Shards[i]
+						if _, ok := leavegid[gid]; ok {
+							newgid := keepgid[j]
+							newconf.Shards[i] = newgid
+							j = (j + 1) % len(keepgid)
+						}
+					}
+				}
+				sm.appendNewconf(newconf)
 			case MOVE:
-			case QUERY:
+				move := msg.Command.(MoveArgs)
+				newconf := sm.getconfig(-1)
+				if move.Shard > 0 && move.Shard < NShards {
+					newconf.Shards[move.Shard] = move.GID
+				}
+				sm.appendNewconf(newconf)
 			default:
 			}
 			sm.dupremove[op.Clientid] = op.Queryid

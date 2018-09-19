@@ -77,8 +77,8 @@ const (
 
 //状态机日志项结构
 type LogEntry struct {
-	Command interface{}
 	Term    int
+	Command interface{}
 }
 
 //
@@ -355,8 +355,8 @@ type AppendEntryArgs struct {
 	Leaderid     int
 	Prevlogindex int
 	Prevlogterm  int
-	Entries      []LogEntry
 	Leadercommit int
+	Entries      []LogEntry
 }
 
 type AppendEntryReply struct {
@@ -429,6 +429,7 @@ func (rf *Raft) commitlogs() {
 
 	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 		//fmt.Println("服务器", rf.me, "应用日志", rf.commitIndex)
+		DPrintf("ApplyMsg : %v,lastApplied is %v,commitIndex is %v, server number is %d", rf.log[i-rf.lastSnapshotindex-1], rf.lastApplied, rf.commitIndex, rf.me)
 		rf.applyCh <- ApplyMsg{
 			CommandIndex: i + 1,
 			CommandTerm:  rf.currentTerm,
@@ -443,6 +444,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//如果日志小于当前任期号，直接拒绝
+	DPrintf("first !!!append LOG is %v: now log is %v,len is %d,server number is %d", args, rf.log, rf.logindex, rf.me)
 	if args.Term < rf.currentTerm {
 		rep.Term = rf.currentTerm
 		rep.Commitindex = -1
@@ -475,6 +477,7 @@ func (rf *Raft) AppendEntries(args AppendEntryArgs, rep *AppendEntryReply) {
 			rf.logindex = args.Prevlogindex
 			rf.log = append(rf.log, args.Entries...)
 			rf.logindex = rf.logindex + len(args.Entries)
+			DPrintf("append LOG is %v: now log is %v,len is %d,server number is %d", args, rf.log, rf.logindex, rf.me)
 			if rf.logindex >= args.Leadercommit {
 				rf.commitIndex = args.Leadercommit
 				go rf.commitlogs()
@@ -526,6 +529,7 @@ func (rf *Raft) sendAppendToFollower() {
 		go func(server int, args AppendEntryArgs) {
 			var reply AppendEntryReply
 			//fmt.Println("主服务器", rf.me, "发起应用日志", args, "到服务器", server)
+			DPrintf("Send append log : %v, server number is %d,term %d", args, rf.me, rf.currentTerm)
 			ok := rf.SendAppendEntryToFollower(server, args, &reply)
 			if ok {
 				//fmt.Println("主服务器", rf.me, "收到到服务器", server, "响应", reply)
@@ -566,7 +570,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = (rf.state == LEADER)
 		return index, term, isLeader
 	}
-
+	DPrintf("command is %v, server number is %v", command, rf.me)
 	isLeader = (rf.state == LEADER)
 	rf.log = append(rf.log, nlog)
 	rf.logindex = rf.logindex + 1

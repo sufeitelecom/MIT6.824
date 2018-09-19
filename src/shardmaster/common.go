@@ -29,14 +29,19 @@ type Config struct {
 }
 
 const (
-	JOIN         = "join"
-	Leave        = "leave"
-	MOVE         = "move"
-	QUERY        = "query"
 	OK           = "OK"
 	ErrNotLeader = "ErrNotLeader"
 	ErrTimeout   = "ErrTimeOut"
 	ErrNoNum     = "ErrNoNum"
+)
+
+type RequestType int
+
+const (
+	JOIN RequestType = iota
+	Leave
+	MOVE
+	QUERY
 )
 
 type Err string
