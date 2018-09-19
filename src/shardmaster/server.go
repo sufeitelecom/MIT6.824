@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -257,7 +257,7 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 				newconf := sm.getconfig(-1)
 				keepgid := make([]int, 0) //记录剩下来的gid
 				leavegid := make(map[int]struct{}, 0)
-				for gid := range leave {
+				for _, gid := range leave {
 					delete(newconf.Groups, gid)
 					leavegid[gid] = struct{}{}
 				}
