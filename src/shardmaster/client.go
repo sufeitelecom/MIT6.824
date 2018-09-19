@@ -36,8 +36,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{ClientId: ck.ClientId, Num: num}
-	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
+	args := &QueryArgs{Clientid: ck.ClientId, Num: num}
+	args.Queryid = atomic.AddInt64(&ck.LastQueryId, 1)
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -52,9 +52,9 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{ClientId: ck.ClientId, Servers: servers}
+	args := &JoinArgs{Clientid: ck.ClientId, Servers: servers}
 	// Your code here.
-	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
+	args.Queryid = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		// try each known server.
@@ -70,9 +70,9 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{ClientId: ck.ClientId, GIDs: gids}
+	args := &LeaveArgs{Clientid: ck.ClientId, GIDs: gids}
 	// Your code here.
-	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
+	args.Queryid = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		// try each known server.
@@ -88,9 +88,9 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{ClientId: ck.ClientId, Shard: shard, GID: gid}
+	args := &MoveArgs{Clientid: ck.ClientId, Shard: shard, GID: gid}
 	// Your code here.
-	args.QueryId = atomic.AddInt64(&ck.LastQueryId, 1)
+	args.Queryid = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		// try each known server.

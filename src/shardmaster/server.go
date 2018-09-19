@@ -40,10 +40,14 @@ type ShardMaster struct {
 
 type Op struct {
 	// Your data here.
-	Type     RequestType
-	Clientid int64
-	Queryid  int64
-	Command  interface{}
+	Type        RequestType
+	Clientid    int64
+	Queryid     int64
+	JoinServers map[int][]string //join
+	LeaveGIDs   []int            //leave
+	MoveShard   int              //move
+	MoveGID     int              //move
+	QueryNum    int              //query
 }
 
 func (sm *ShardMaster) ExecOp(op Op) Err {
@@ -81,12 +85,12 @@ func (sm *ShardMaster) ExecOp(op Op) Err {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
-	join := JoinArgs{ClientId: args.ClientId, QueryId: args.QueryId, Servers: make(map[int][]string)}
+	servers := make(map[int][]string)
 	for gid, server := range args.Servers {
-		join.Servers[gid] = append([]string{}, server...)
+		servers[gid] = append([]string{}, server...)
 	}
-	arg := Op{Type: JOIN, Clientid: args.ClientId, Queryid: args.QueryId, Command: join}
-	reply.Err = sm.ExecOp(arg)
+	op := Op{Type: JOIN, Clientid: args.Clientid, Queryid: args.Queryid, JoinServers: servers}
+	reply.Err = sm.ExecOp(op)
 	if reply.Err != OK {
 		reply.WrongLeader = true
 		return
@@ -98,9 +102,8 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
-	leave := LeaveArgs{ClientId: args.ClientId, QueryId: args.QueryId, GIDs: append([]int{}, args.GIDs...)}
-	arg := Op{Type: Leave, Clientid: args.ClientId, Queryid: args.QueryId, Command: leave}
-	reply.Err = sm.ExecOp(arg)
+	op := Op{Type: Leave, Clientid: args.Clientid, Queryid: args.Queryid, LeaveGIDs: args.GIDs}
+	reply.Err = sm.ExecOp(op)
 	if reply.Err != OK {
 		reply.WrongLeader = true
 		return
@@ -112,9 +115,8 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
-	move := MoveArgs{ClientId: args.ClientId, QueryId: args.ClientId, GID: args.GID, Shard: args.Shard}
-	arg := Op{Type: MOVE, Clientid: args.ClientId, Queryid: args.QueryId, Command: move}
-	reply.Err = sm.ExecOp(arg)
+	op := Op{Type: MOVE, Clientid: args.Clientid, Queryid: args.Queryid, MoveGID: args.GID, MoveShard: args.Shard}
+	reply.Err = sm.ExecOp(op)
 	if reply.Err != OK {
 		reply.WrongLeader = true
 		return
@@ -126,9 +128,8 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
-	query := QueryArgs{ClientId: args.ClientId, QueryId: args.QueryId, Num: args.Num}
-	arg := Op{Type: QUERY, Clientid: args.ClientId, Queryid: args.QueryId, Command: query}
-	reply.Err = sm.ExecOp(arg)
+	op := Op{Type: QUERY, Clientid: args.Clientid, Queryid: args.Queryid, QueryNum: args.Num}
+	reply.Err = sm.ExecOp(op)
 	if reply.Err != OK {
 		reply.WrongLeader = true
 		return
@@ -205,11 +206,11 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 		if index, ok := sm.dupremove[op.Clientid]; !ok || index < op.Queryid {
 			switch op.Type {
 			case JOIN:
-				jion := op.Command.(JoinArgs)
+				jion := op.JoinServers
 				newconf := sm.getconfig(-1)
 				NewShards := make([]int, 0) //记录新加入的gid
 				//初始化Groups
-				for gid, servers := range jion.Servers {
+				for gid, servers := range jion {
 					if _, ok := newconf.Groups[gid]; ok {
 						newconf.Groups[gid] = append(newconf.Groups[gid], servers...)
 					} else {
@@ -239,7 +240,7 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 							(minShardNum < maxShardNum && ShardNum[gid] == minShardNum && maxShardNumCount <= 0) {
 							newgid := NewShards[j]
 							newconf.Shards[i] = newgid
-							ShardNum[gid] += 1
+							ShardNum[newgid] += 1
 							j = (j + 1) % len(NewShards) //这里主要是为了循环分配给每个新加入的group
 						} else { //其他情况保持原来的分配
 							ShardNum[gid] += 1
@@ -252,11 +253,11 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 				//最后将新的conf配置添加到配置中
 				sm.appendNewconf(newconf)
 			case Leave:
-				leave := msg.Command.(LeaveArgs)
+				leave := op.LeaveGIDs
 				newconf := sm.getconfig(-1)
 				keepgid := make([]int, 0) //记录剩下来的gid
 				leavegid := make(map[int]struct{}, 0)
-				for gid := range leave.GIDs {
+				for gid := range leave {
 					delete(newconf.Groups, gid)
 					leavegid[gid] = struct{}{}
 				}
@@ -278,10 +279,11 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 				}
 				sm.appendNewconf(newconf)
 			case MOVE:
-				move := msg.Command.(MoveArgs)
+				moveshard := op.MoveShard
+				movegid := op.MoveGID
 				newconf := sm.getconfig(-1)
-				if move.Shard > 0 && move.Shard < NShards {
-					newconf.Shards[move.Shard] = move.GID
+				if moveshard > 0 && moveshard < NShards {
+					newconf.Shards[moveshard] = movegid
 				}
 				sm.appendNewconf(newconf)
 			default:
@@ -312,7 +314,7 @@ func (sm *ShardMaster) getconfig(num int) Config {
 		src = sm.configs[num]
 	}
 	dst := Config{Num: src.Num, Shards: src.Shards, Groups: make(map[int][]string)}
-	for git, servers := range dst.Groups {
+	for git, servers := range src.Groups {
 		dst.Groups[git] = append([]string{}, servers...)
 	}
 	return dst
