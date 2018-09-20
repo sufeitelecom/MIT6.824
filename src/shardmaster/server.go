@@ -208,6 +208,7 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 			case JOIN:
 				jion := op.JoinServers
 				newconf := sm.getconfig(-1)
+				DPrintf("server number: %d ,before join : conf is %v,join gid is %v", sm.me, newconf, jion)
 				NewShards := make([]int, 0) //记录新加入的gid
 				//初始化Groups
 				for gid, servers := range jion {
@@ -237,7 +238,8 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 						//2、超过最大分片数的需要重新分配
 						if gid == 0 ||
 							(minShardNum == maxShardNum && ShardNum[gid] == minShardNum) ||
-							(minShardNum < maxShardNum && ShardNum[gid] == minShardNum && maxShardNumCount <= 0) {
+							(minShardNum < maxShardNum && ShardNum[gid] == minShardNum && maxShardNumCount <= 0) ||
+							(minShardNum < maxShardNum && ShardNum[gid] == maxShardNum) {
 							newgid := NewShards[j]
 							newconf.Shards[i] = newgid
 							ShardNum[newgid] += 1
@@ -250,11 +252,13 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 						}
 					}
 				}
+				DPrintf("server number: %d ,after join : conf is %v,join gid is %v", sm.me, newconf, jion)
 				//最后将新的conf配置添加到配置中
 				sm.appendNewconf(newconf)
 			case Leave:
 				leave := op.LeaveGIDs
 				newconf := sm.getconfig(-1)
+				DPrintf("server number: %d ,before leave : conf is %v,remove gid is %v", sm.me, newconf, leave)
 				keepgid := make([]int, 0) //记录剩下来的gid
 				leavegid := make(map[int]struct{}, 0)
 				for _, gid := range leave {
@@ -268,23 +272,61 @@ func (sm *ShardMaster) Apply(msg raft.ApplyMsg) {
 				if len(newconf.Groups) == 0 {
 					newconf.Shards = [NShards]int{}
 				} else {
-					for i, j := 0, 0; i < NShards; i++ {
-						gid := newconf.Shards[i]
-						if _, ok := leavegid[gid]; ok {
-							newgid := keepgid[j]
-							newconf.Shards[i] = newgid
-							j = (j + 1) % len(keepgid)
+					min := NShards / len(newconf.Groups)
+					max := min
+					remainder := 0
+					if remainder = NShards % len(newconf.Groups); remainder != 0 {
+						max = min + 1
+					} else {
+						max = min
+					}
+					maxcount := 0
+					shardcout := make(map[int]int)
+
+					// 开始重新分布
+					// 记录现在分布情况
+
+					for i := 0; i < NShards; i++ {
+						git := newconf.Shards[i]
+						if _, ok := leavegid[git]; !ok {
+							shardcout[git] += 1
+							if max == shardcout[git] {
+								maxcount += 1
+							}
 						}
 					}
+					DPrintf("server number: %d ,maxcount is %d,remainder is %d,min is %d,max is %d,leave gid is %v,shardcout is %v", sm.me, maxcount, remainder, min, max, leavegid, shardcout)
+					for i := 0; i < NShards; i++ {
+						git := newconf.Shards[i]
+						if _, ok := leavegid[git]; ok || shardcout[git] > max || (min != max && shardcout[git] == max && maxcount > remainder) {
+							for _, newgid := range keepgid {
+								num := shardcout[newgid]
+								if num < min {
+									newconf.Shards[i] = newgid
+									shardcout[newgid] += 1
+									break
+								} else if min != max && num == min && maxcount < remainder {
+									newconf.Shards[i] = newgid
+									shardcout[newgid] += 1
+									maxcount += 1
+									break
+								}
+							}
+						}
+					}
+
 				}
+				DPrintf("server number: %d ,after leave : conf is %v,remove gid is %v", sm.me, newconf, leave)
 				sm.appendNewconf(newconf)
 			case MOVE:
 				moveshard := op.MoveShard
 				movegid := op.MoveGID
 				newconf := sm.getconfig(-1)
-				if moveshard > 0 && moveshard < NShards {
+				DPrintf("server number: %d ,before move : conf is %v,move gid is %v,shard is %v", sm.me, newconf, movegid, moveshard)
+				if moveshard >= 0 && moveshard < NShards {
 					newconf.Shards[moveshard] = movegid
 				}
+				DPrintf("server number: %d ,after move : conf is %v,move gid is %v,shard is %v", sm.me, newconf, movegid, moveshard)
 				sm.appendNewconf(newconf)
 			default:
 			}
