@@ -12,7 +12,10 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "shardmaster"
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 //
 // which shard is a key in?
@@ -40,6 +43,8 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	ClientId    int64
+	LastQueryId int64
 }
 
 //
@@ -56,6 +61,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.ClientId = nrand()
+	ck.LastQueryId = 0
+	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -68,6 +76,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.ClientId = ck.ClientId
+	args.ConfigNum = ck.config.Num
+	args.LastQueryId = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		shard := key2shard(key)
@@ -103,7 +114,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClientId = ck.ClientId
+	args.ConfigNum = ck.config.Num
+	args.LastQueryId = atomic.AddInt64(&ck.LastQueryId, 1)
 
 	for {
 		shard := key2shard(key)
