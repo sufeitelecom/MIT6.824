@@ -23,6 +23,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 const Timeout = time.Second * 3
+const PullingInterval = time.Millisecond * time.Duration(150)
 
 type Op struct {
 	// Your definitions here.
@@ -97,6 +98,7 @@ func (kv *ShardKV) Opexec(op Op) Err {
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	if args.ConfigNum != kv.config.Num {
+		DPrintf("Get:ConfigNum is different,args is %v ,kv.config.Num is %v", args, kv.config.Num)
 		reply.Err = ErrWrongGroup
 		return
 	}
@@ -104,6 +106,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	op.ClientId = args.ClientId
 	op.LastQueryId = args.LastQueryId
 	op.Key = args.Key
+	op.Type = OpGet
 
 	reply.Err = kv.Opexec(op)
 	if reply.Err != OK {
@@ -126,10 +129,11 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	if args.ConfigNum != kv.config.Num {
+		DPrintf("PutAppend:ConfigNum is different,args is %v ,kv.config.Num is %v", args, kv.config.Num)
 		reply.Err = ErrWrongGroup
 		return
 	}
-	op := Op{ClientId: args.ClientId, LastQueryId: args.LastQueryId, Key: args.Key, Value: args.Value}
+	op := Op{ClientId: args.ClientId, LastQueryId: args.LastQueryId, Key: args.Key, Value: args.Value, Type: args.Op}
 	reply.Err = kv.Opexec(op)
 	if reply.Err == OK {
 		reply.WrongLeader = false
@@ -197,7 +201,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.data = make(map[string]string)
 	kv.dupremove = make(map[int64]int64)
 	kv.term = 0
@@ -206,6 +209,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.sm = shardmaster.MakeClerk(kv.masters)
 	kv.config = kv.sm.Query(-1)
 	kv.loaddata(persister.ReadSnapshot())
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	go func() {
 		for {
@@ -213,11 +217,71 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 			kv.ApplyMsg(msg)
 		}
 	}()
+
+	go func() {
+		pollingTimer := time.NewTimer(PullingInterval)
+		for {
+			select {
+			case <-pollingTimer.C:
+				pollingTimer.Reset(PullingInterval)
+				kv.mu.Lock()
+				nextConfigNum := kv.config.Num + 1
+				kv.mu.Unlock()
+				newconf := kv.sm.Query(nextConfigNum)
+				kv.mu.Lock()
+				if newconf.Num > kv.config.Num {
+					kv.config = newconf
+				}
+				kv.mu.Unlock()
+			}
+		}
+	}()
 	return kv
 }
 
 func (kv *ShardKV) ApplyMsg(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 
+	if msg.CommandValid == false {
+		if msg.Command == LOADSNAPSHOT {
+			if msg.SnapShotTerm > kv.term || (msg.SnapShotTerm == kv.term && msg.SnapShotIndex > (kv.index-1)) {
+				DPrintf("\n sever ", kv.me, "\nMSG: TERM,INDEX", msg.SnapShotTerm, msg.SnapShotIndex, "\n kv: term,index", kv.term, kv.index)
+				kv.loaddata(msg.SnapShot)
+			}
+		}
+		return
+	} else if op, ok := msg.Command.(Op); ok {
+		//检测命令是否可以执行，clienid下opid为空或者大于相应opid（去重）才能执行
+		if index, ok := kv.dupremove[op.ClientId]; !ok || index < op.LastQueryId {
+			switch op.Type {
+			case OpPut:
+				kv.data[op.Key] = op.Value
+			case OpAppend:
+				kv.data[op.Key] = kv.data[op.Key] + op.Value
+			default:
+			}
+			DPrintf("gid is %v,server number is %v,op type is %v,data is %v", kv.gid, kv.me, op.Type, kv.data)
+			kv.dupremove[op.ClientId] = op.LastQueryId
+			kv.term = msg.CommandTerm
+			kv.index = msg.CommandIndex
+		} else {
+			DPrintf("Duplicate operation!!")
+		}
+		if waiting, ok := kv.waitingforOp[msg.CommandIndex]; ok {
+			for _, waiter := range waiting {
+				if waiter.op.ClientId == op.ClientId && waiter.op.LastQueryId == op.LastQueryId {
+					waiter.waitchan <- true
+				} else {
+					waiter.waitchan <- false
+				}
+			}
+		}
+	}
+	if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
+		data := kv.persistdata()
+		go kv.rf.SaveSnapShotAndState(data, kv.index-1, kv.term)
+	}
 }
 
 //调用者持mu锁

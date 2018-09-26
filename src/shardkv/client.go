@@ -83,12 +83,15 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.ConfigNum = ck.config.Num
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
+				DPrintf("Send to server %v, Get args is : %v", servers[si], args)
 				ok := srv.Call("ShardKV.Get", &args, &reply)
+				DPrintf("Recieve from server %v, Get reply is : %v", servers[si], reply)
 				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
 				}
@@ -100,6 +103,7 @@ func (ck *Clerk) Get(key string) string {
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		DPrintf("Get: get newconfig ,confignum is %v", ck.config.Num)
 	}
 
 	return ""
@@ -121,11 +125,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		args.ConfigNum = ck.config.Num
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
+				DPrintf("Send to server %v, PutAppend args is : %v", servers[si], args)
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				DPrintf("Recieve from server %v, PutAppend reply is : %v", servers[si], reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					return
 				}
@@ -137,6 +144,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		DPrintf("PutAppend: get newconfig ,confignum is %v", ck.config.Num)
 	}
 }
 

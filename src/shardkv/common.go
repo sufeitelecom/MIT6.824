@@ -17,6 +17,13 @@ const (
 	ErrTimeout     = "ErrTimeOut"
 )
 
+const (
+	OpPut        = "Put"
+	OpAppend     = "Append"
+	OpGet        = "get"
+	LOADSNAPSHOT = "loadsnapshotting"
+)
+
 type Err string
 
 // Put or Append
