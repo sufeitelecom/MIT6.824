@@ -23,7 +23,8 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 const Timeout = time.Second * 3
-const PullingInterval = time.Millisecond * time.Duration(150)
+const PullingInterval = time.Millisecond * time.Duration(100)
+const cleaninterval = time.Second * time.Duration(2)
 
 type Op struct {
 	// Your definitions here.
@@ -52,8 +53,13 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	sm           *shardmaster.Clerk
-	config       shardmaster.Config
+	sm       *shardmaster.Clerk
+	config   shardmaster.Config
+	ownshard map[int]struct{}
+
+	addshard    map[int]int //shard->confignum,对应confignum需要嵌入的分片
+	removeshard map[int]int //需要迁出的分片
+
 	data         map[string]string
 	waitingforOp map[int][]*WaitingOp //异步等待相应操作完成
 	dupremove    map[int64]int64      // 去重
@@ -208,6 +214,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.waitingforOp = make(map[int][]*WaitingOp)
 	kv.sm = shardmaster.MakeClerk(kv.masters)
 	kv.config = kv.sm.Query(-1)
+	kv.addshard = make(map[int]int)
+	kv.removeshard = make(map[int]int)
+
 	kv.loaddata(persister.ReadSnapshot())
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
@@ -220,23 +229,30 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go func() {
 		pollingTimer := time.NewTimer(PullingInterval)
+		cleanTimer := time.NewTimer(cleaninterval)
 		for {
 			select {
 			case <-pollingTimer.C:
 				pollingTimer.Reset(PullingInterval)
-				kv.mu.Lock()
-				nextConfigNum := kv.config.Num + 1
-				kv.mu.Unlock()
-				newconf := kv.sm.Query(nextConfigNum)
-				kv.mu.Lock()
-				if newconf.Num > kv.config.Num {
-					kv.config = newconf
+				_, leader := kv.rf.GetState()
+				if len(kv.addshard) == 0 && len(kv.removeshard) == 0 && leader == true {
+					newconf := kv.sm.Query(-1)
+					if newconf.Num > kv.config.Num {
+						kv.rf.Start(newconf)
+					}
 				}
-				kv.mu.Unlock()
+			case <-cleanTimer.C:
+				cleanTimer.Reset(cleaninterval)
+
 			}
 		}
 	}()
+
 	return kv
+}
+
+func (kv *ShardKV) Applyconf(config shardmaster.Config) {
+
 }
 
 func (kv *ShardKV) ApplyMsg(msg raft.ApplyMsg) {
@@ -277,6 +293,8 @@ func (kv *ShardKV) ApplyMsg(msg raft.ApplyMsg) {
 				}
 			}
 		}
+	} else if newConfig, ok := msg.Command.(shardmaster.Config); ok {
+		kv.Applyconf(newConfig)
 	}
 	if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
 		data := kv.persistdata()
