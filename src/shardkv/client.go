@@ -89,7 +89,7 @@ func (ck *Clerk) Get(key string) string {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
-				DPrintf("Send to server %v, Get args is : %v", servers[si], args)
+				DPrintf("Send to server %v, Get args is : %v,key :%v", servers[si], args, key2shard(args.Key))
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				DPrintf("Recieve from server %v, Get reply is : %v", servers[si], reply)
 				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
@@ -130,7 +130,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
-				DPrintf("Send to server %v, PutAppend args is : %v", servers[si], args)
+				DPrintf("Send to server %v, PutAppend args is : %v,key :%v", servers[si], args, key2shard(args.Key))
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				DPrintf("Recieve from server %v, PutAppend reply is : %v", servers[si], reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {

@@ -69,12 +69,12 @@ type ShardKV struct {
 	index        int
 }
 
-func (kv *ShardKV) Opexec(op Op) Err {
-
+func (kv *ShardKV) Opexec(op Op) (Err, string) {
+	str := ""
 	index, _, isleader := kv.rf.Start(op)
 	if isleader == false {
 		DPrintf("server ", kv.me, "this is not leader!!")
-		return ErrWrongLeader
+		return ErrWrongLeader, str
 	}
 
 	waiting := make(chan bool, 1)
@@ -90,6 +90,7 @@ func (kv *ShardKV) Opexec(op Op) Err {
 	case ok = <-waiting:
 		if ok {
 			res = OK
+			str = op.Value
 		} else {
 			res = ErrWrongLeader
 		}
@@ -100,7 +101,7 @@ func (kv *ShardKV) Opexec(op Op) Err {
 	kv.mu.Lock()
 	delete(kv.waitingforOp, index)
 	kv.mu.Unlock()
-	return res
+	return res, str
 }
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
@@ -116,16 +117,13 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	op.Key = args.Key
 	op.Type = OpGet
 
-	reply.Err = kv.Opexec(op)
+	reply.Err, reply.Value = kv.Opexec(op)
 	if reply.Err != OK {
 		reply.WrongLeader = true
 		return
 	} else {
 		reply.WrongLeader = false
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		if value, ok := kv.data[args.Key]; ok {
-			reply.Value = value
+		if reply.Value != "" {
 			return
 		} else {
 			reply.Err = ErrNoKey
@@ -142,7 +140,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	op := Op{ClientId: args.ClientId, LastQueryId: args.LastQueryId, Key: args.Key, Value: args.Value, Type: args.Op}
-	reply.Err = kv.Opexec(op)
+	reply.Err, _ = kv.Opexec(op)
 	if reply.Err == OK {
 		reply.WrongLeader = false
 		return
@@ -196,6 +194,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 	labgob.Register(shardmaster.Config{})
+	labgob.Register(MigrationArgs{})
 	labgob.Register(MigrationReply{})
 
 	kv := new(ShardKV)
@@ -272,11 +271,14 @@ func (kv *ShardKV) Applyconf(config shardmaster.Config) {
 		return
 	}
 	DPrintf("START Applyconf,%v-%v,oldconf: %v,newconf: %v", kv.gid, kv.me, kv.config, config)
-	oldshard, oldconfig := kv.ownshard, kv.config
-	kv.historyConfigs[oldconfig.Num] = kv.config
+	oldshard, oldconfig := kv.ownshard, shardmaster.Config{Num: kv.config.Num, Shards: kv.config.Shards, Groups: make(map[int][]string)}
+	for git, servers := range kv.config.Groups {
+		oldconfig.Groups[git] = append([]string{}, servers...)
+	}
+	kv.historyConfigs[oldconfig.Num] = oldconfig
 	kv.ownshard = make(map[int]struct{})
 	kv.config = shardmaster.Config{Num: config.Num, Shards: config.Shards, Groups: make(map[int][]string)}
-	for git, servers := range kv.config.Groups {
+	for git, servers := range config.Groups {
 		kv.config.Groups[git] = append([]string{}, servers...)
 	}
 	for shard, gid := range kv.config.Shards {
@@ -374,6 +376,9 @@ func (kv *ShardKV) ApplyMsg(msg raft.ApplyMsg) {
 		if waiting, ok := kv.waitingforOp[msg.CommandIndex]; ok {
 			for _, waiter := range waiting {
 				if waiter.op.ClientId == op.ClientId && waiter.op.LastQueryId == op.LastQueryId {
+					if waiter.op.Type == OpGet {
+						waiter.op.Value = kv.data[waiter.op.Key]
+					}
 					waiter.waitchan <- true
 				} else {
 					waiter.waitchan <- false
