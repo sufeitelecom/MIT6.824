@@ -21,6 +21,8 @@ const (
 	OpPut        = "Put"
 	OpAppend     = "Append"
 	OpGet        = "get"
+	OpMigration  = "migration"
+	OpClean      = "clean"
 	LOADSNAPSHOT = "loadsnapshotting"
 )
 
@@ -57,4 +59,20 @@ type GetReply struct {
 	WrongLeader bool
 	Err         Err
 	Value       string
+}
+
+type MigrationArgs struct {
+	Shard     int
+	ConfigNum int
+}
+
+type MigrationData struct {
+	Data map[string]string
+}
+
+type MigrationReply struct {
+	Err           Err
+	Shard         int
+	ConfigNum     int
+	MigrationData MigrationData
 }

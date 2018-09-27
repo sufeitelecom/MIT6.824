@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -57,8 +57,10 @@ type ShardKV struct {
 	config   shardmaster.Config
 	ownshard map[int]struct{}
 
-	addshard    map[int]int //shard->confignum,对应confignum需要嵌入的分片
-	removeshard map[int]int //需要迁出的分片
+	waitshard      map[int]int                   //shard->confignum,对应confignum需要嵌入的分片
+	migration      map[int]map[int]MigrationData //需要迁出的分片 confignum->shard->kv
+	historyConfigs map[int]shardmaster.Config
+	cleanshard     map[int]int
 
 	data         map[string]string
 	waitingforOp map[int][]*WaitingOp //异步等待相应操作完成
@@ -214,8 +216,11 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.waitingforOp = make(map[int][]*WaitingOp)
 	kv.sm = shardmaster.MakeClerk(kv.masters)
 	kv.config = kv.sm.Query(-1)
-	kv.addshard = make(map[int]int)
-	kv.removeshard = make(map[int]int)
+	kv.ownshard = make(map[int]struct{})
+	kv.waitshard = make(map[int]int)
+	kv.migration = make(map[int]map[int]MigrationData)
+	kv.historyConfigs = make(map[int]shardmaster.Config)
+	kv.cleanshard = make(map[int]int)
 
 	kv.loaddata(persister.ReadSnapshot())
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
@@ -234,11 +239,20 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 			select {
 			case <-pollingTimer.C:
 				pollingTimer.Reset(PullingInterval)
-				_, leader := kv.rf.GetState()
-				if len(kv.addshard) == 0 && len(kv.removeshard) == 0 && leader == true {
-					newconf := kv.sm.Query(-1)
+				if len(kv.waitshard) == 0 {
+					kv.mu.Lock()
+					nextnum := kv.config.Num + 1
+					kv.mu.Unlock()
+					newconf := kv.sm.Query(nextnum)
+					kv.mu.Lock()
 					if newconf.Num > kv.config.Num {
+						DPrintf("config change: %v-%v,oldconfig nun %v,newconfig num %v", kv.gid, kv.me, kv.config.Num, newconf.Num)
 						kv.rf.Start(newconf)
+					}
+					kv.mu.Unlock()
+				} else if _, isLeader := kv.rf.GetState(); isLeader {
+					for shard, configNum := range kv.waitshard {
+						go kv.pullshard(shard, kv.historyConfigs[configNum])
 					}
 				}
 			case <-cleanTimer.C:
@@ -252,7 +266,78 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 }
 
 func (kv *ShardKV) Applyconf(config shardmaster.Config) {
+	if config.Num <= kv.config.Num {
+		return
+	}
+	DPrintf("START Applyconf,%v-%v,oldconf: %v,newconf: %v", kv.gid, kv.me, kv.config, config)
+	oldshard, oldconfig := kv.ownshard, kv.config
+	kv.historyConfigs[oldconfig.Num] = kv.config
+	kv.ownshard = make(map[int]struct{})
+	kv.config = shardmaster.Config{Num: config.Num, Shards: config.Shards, Groups: make(map[int][]string)}
+	for git, servers := range kv.config.Groups {
+		kv.config.Groups[git] = append([]string{}, servers...)
+	}
+	for shard, gid := range kv.config.Shards {
+		if gid == kv.gid {
+			if _, ok := oldshard[shard]; ok || oldconfig.Num == 0 {
+				kv.ownshard[shard] = struct{}{}
+				delete(oldshard, shard)
+			} else {
+				kv.waitshard[shard] = oldconfig.Num
+			}
+		}
+	}
+	if len(oldshard) != 0 {
+		tmp := make(map[int]MigrationData)
+		for shard := range oldshard {
+			data := MigrationData{Data: make(map[string]string)}
+			for k, v := range kv.data {
+				if key2shard(k) == shard {
+					data.Data[k] = v
+					delete(kv.data, k)
+				}
+			}
+			tmp[shard] = data
+		}
+		kv.migration[oldconfig.Num] = tmp
+	}
+	DPrintf("END Applyconf,%v-%v,waitshard: %v,migration: %v", kv.gid, kv.me, kv.waitshard, kv.migration[oldconfig.Num])
+}
 
+func (kv *ShardKV) pullshard(shard int, oldConfig shardmaster.Config) {
+	configNum := oldConfig.Num
+	gid := oldConfig.Shards[shard]
+	servers := oldConfig.Groups[gid]
+	args := MigrationArgs{Shard: shard, ConfigNum: configNum}
+
+	for si, server := range servers {
+		srv := kv.make_end(server)
+		var reply MigrationReply
+		ok := srv.Call("ShardKV.ShardMigration", &args, &reply)
+		if ok && reply.Err == OK {
+			DPrintf("%d-%d pull shard %d at %d from %d-%d SUCCESS", kv.gid, kv.me, shard, configNum, gid, si)
+			kv.rf.Start(reply)
+			return
+		}
+	}
+}
+
+func (kv *ShardKV) ShardMigration(args *MigrationArgs, reply *MigrationReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	reply.Err, reply.Shard, reply.ConfigNum = OK, args.Shard, args.ConfigNum
+	if args.ConfigNum >= kv.config.Num {
+		reply.Err = ErrWrongGroup
+		return
+	}
+	reply.MigrationData = MigrationData{Data: make(map[string]string)}
+	if v, ok := kv.migration[args.ConfigNum]; ok {
+		if migrationData, ok := v[args.Shard]; ok {
+			for k, v := range migrationData.Data {
+				reply.MigrationData.Data[k] = v
+			}
+		}
+	}
 }
 
 func (kv *ShardKV) ApplyMsg(msg raft.ApplyMsg) {
@@ -295,6 +380,16 @@ func (kv *ShardKV) ApplyMsg(msg raft.ApplyMsg) {
 		}
 	} else if newConfig, ok := msg.Command.(shardmaster.Config); ok {
 		kv.Applyconf(newConfig)
+	} else if args, ok := msg.Command.(MigrationReply); ok {
+		if args.ConfigNum == kv.config.Num-1 {
+			delete(kv.waitshard, args.Shard)
+			if _, ok := kv.ownshard[args.Shard]; !ok {
+				kv.ownshard[args.Shard] = struct{}{}
+				for k, v := range args.MigrationData.Data {
+					kv.data[k] = v
+				}
+			}
+		}
 	}
 	if kv.maxraftstate != -1 && kv.rf.Getpersister().RaftStateSize() > kv.maxraftstate {
 		data := kv.persistdata()
@@ -311,6 +406,9 @@ func (kv *ShardKV) persistdata() []byte {
 	e.Encode(kv.index)
 	e.Encode(kv.dupremove)
 	e.Encode(kv.data)
+	e.Encode(kv.config)
+	e.Encode(kv.ownshard)
+	e.Encode(kv.historyConfigs)
 	data := w.Bytes()
 	return data
 }
@@ -324,9 +422,13 @@ func (kv *ShardKV) loaddata(data []byte) {
 	var index int
 	var dup map[int64]int64
 	var dat map[string]string
+	var config shardmaster.Config
+	var ownshard map[int]struct{}
+	var his map[int]shardmaster.Config
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if d.Decode(&gid) != nil || d.Decode(&term) != nil || d.Decode(&index) != nil || d.Decode(&dup) != nil || d.Decode(&dat) != nil {
+	if d.Decode(&gid) != nil || d.Decode(&term) != nil || d.Decode(&index) != nil || d.Decode(&dup) != nil || d.Decode(&dat) != nil ||
+		d.Decode(&config) != nil || d.Decode(&ownshard) != nil || d.Decode(&his) != nil {
 		panic("read data error")
 	} else {
 		kv.data = gid
@@ -334,6 +436,9 @@ func (kv *ShardKV) loaddata(data []byte) {
 		kv.index = index
 		kv.dupremove = dup
 		kv.data = dat
+		kv.config = config
+		kv.ownshard = ownshard
+		kv.historyConfigs = his
 	}
 	return
 }
