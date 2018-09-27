@@ -106,16 +106,17 @@ func (kv *ShardKV) Opexec(op Op) (Err, string) {
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	if args.ConfigNum != kv.config.Num {
-		DPrintf("Get:ConfigNum is different,args is %v ,kv.config.Num is %v", args, kv.config.Num)
-		reply.Err = ErrWrongGroup
-		return
-	}
 	op := Op{}
 	op.ClientId = args.ClientId
 	op.LastQueryId = args.LastQueryId
 	op.Key = args.Key
 	op.Type = OpGet
+
+	if args.ConfigNum != kv.config.Num {
+		DPrintf("Get:ConfigNum is different,args is %v ,kv.config.Num is %v", args, kv.config.Num)
+		reply.Err = ErrWrongGroup
+		return
+	}
 
 	reply.Err, reply.Value = kv.Opexec(op)
 	if reply.Err != OK {
@@ -124,6 +125,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	} else {
 		reply.WrongLeader = false
 		if reply.Value != "" {
+			return
+		} else if args.ConfigNum != kv.config.Num {
+			reply.Err = ErrWrongGroup
 			return
 		} else {
 			reply.Err = ErrNoKey
@@ -134,12 +138,12 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{ClientId: args.ClientId, LastQueryId: args.LastQueryId, Key: args.Key, Value: args.Value, Type: args.Op}
 	if args.ConfigNum != kv.config.Num {
 		DPrintf("PutAppend:ConfigNum is different,args is %v ,kv.config.Num is %v", args, kv.config.Num)
 		reply.Err = ErrWrongGroup
 		return
 	}
-	op := Op{ClientId: args.ClientId, LastQueryId: args.LastQueryId, Key: args.Key, Value: args.Value, Type: args.Op}
 	reply.Err, _ = kv.Opexec(op)
 	if reply.Err == OK {
 		reply.WrongLeader = false
